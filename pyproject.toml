@@ -1,0 +1,23 @@
+[project]
+name = "viewalign"
+version = "0.1.0"
+description = "Align photos taken from approximately the same viewpoint to a common reference."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "numpy>=2.0",
+    "opencv-python>=4.10",
+    "Pillow>=10.0",
+]
+
+[project.scripts]
+viewalign = "viewalign.cli:main"
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
