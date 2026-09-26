@@ -7,9 +7,11 @@ import cv2
 import numpy as np
 
 from .alignment import AlignmentResult, SIFTAligner, scale_affine_to_full_resolution
+from .derived import RenderedFrame, create_average, create_mosaic
 from .diagnostics import draw_matches, save_overlay, write_metrics
 from .images import discover_images, load_oriented_bgr, resize_for_working
 from .ordering import order_images
+from .video import create_video
 
 
 def _save_jpeg(path: Path, image: np.ndarray, quality: int) -> None:
@@ -109,11 +111,19 @@ def run_alignment(
     min_matches: int = 8,
     ratio_threshold: float = 0.75,
     ransac_threshold: float = 4.0,
+    duration: float = 0.5,
+    mosaic_polygons: int = 50,
+    mosaic_seed: int | None = None,
     log: Callable[[str], None] = print,
 ) -> dict:
     paths = discover_images(input_dir)
     if len(paths) < 2:
         raise ValueError("Need at least two supported images")
+    if duration <= 0:
+        raise ValueError("duration must be greater than zero")
+    if mosaic_polygons < 0:
+        raise ValueError("mosaic_polygons must be non-negative")
+
     ordered, missing_timestamps = order_images(paths, order)
     if missing_timestamps and order == "timestamp":
         log(f"Warning: {len(missing_timestamps)} image(s) have no EXIF timestamp; they are sorted last")
@@ -172,8 +182,19 @@ def run_alignment(
             continue
         if path == reference_path:
             matrix_work = np.array([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]], dtype=np.float64)
-            result = AlignmentResult(True, matrix_work, len(reference_keypoints), len(reference_keypoints),
-                                     len(reference_keypoints), 1.0, 0.0, 0.0, 1.0, 0.0, 0.0)
+            result = AlignmentResult(
+                True,
+                matrix_work,
+                len(reference_keypoints),
+                len(reference_keypoints),
+                len(reference_keypoints),
+                1.0,
+                0.0,
+                0.0,
+                1.0,
+                0.0,
+                0.0,
+            )
         else:
             result = aligner.align(reference_keypoints, reference_descriptors, working[path])
 
@@ -197,12 +218,17 @@ def run_alignment(
             metrics.append(item)
             log(f"[REJECT] {path.name}: {result.reason}")
             if diagnostics:
-                draw_matches(diagnostics_dir / "matches" / f"{path.stem}_matches.jpg",
-                             result, reference_work, working[path])
+                draw_matches(
+                    diagnostics_dir / "matches" / f"{path.stem}_matches.jpg",
+                    result,
+                    reference_work,
+                    working[path],
+                )
             continue
 
-        transform_full = scale_affine_to_full_resolution(result.transform, scales[path], reference_scale)
-        # Use the reference-sized warp for diagnostics; final output may use an expanded canvas.
+        transform_full = scale_affine_to_full_resolution(
+            result.transform, scales[path], reference_scale
+        )
         preview_warped = cv2.warpAffine(
             loaded[path],
             transform_full,
@@ -225,20 +251,35 @@ def run_alignment(
         item["transform_full_resolution"] = transform_full.tolist()
         metrics.append(item)
         if diagnostics:
-            draw_matches(diagnostics_dir / "matches" / f"{path.stem}_matches.jpg",
-                         result, reference_work, working[path])
-            save_overlay(diagnostics_dir / "overlays" / f"{path.stem}_overlay.jpg",
-                         reference_image, preview_warped)
+            draw_matches(
+                diagnostics_dir / "matches" / f"{path.stem}_matches.jpg",
+                result,
+                reference_work,
+                working[path],
+            )
+            save_overlay(
+                diagnostics_dir / "overlays" / f"{path.stem}_overlay.jpg",
+                reference_image,
+                preview_warped,
+            )
         log(f"[ OK ] {path.name}: {result.inlier_count}/{result.match_count} inliers")
+
+    if not successful:
+        raise RuntimeError("No images could be aligned")
 
     crop_rect = None
     fit_canvas = None
     fit_origin = (0.0, 0.0)
     if crop == "intersection":
-        crop_rect = _compute_intersection_crop(valid_masks, reference_scale, ref_width, ref_height)
+        crop_rect = _compute_intersection_crop(
+            valid_masks, reference_scale, ref_width, ref_height
+        )
         if crop_rect is None:
             raise RuntimeError("Could not compute a non-empty common intersection crop")
-        log(f"Intersection crop: x={crop_rect[0]}, y={crop_rect[1]}, w={crop_rect[2]}, h={crop_rect[3]}")
+        log(
+            f"Intersection crop: x={crop_rect[0]}, y={crop_rect[1]}, "
+            f"w={crop_rect[2]}, h={crop_rect[3]}"
+        )
     elif crop == "fit":
         fit_inputs = [
             (transform, loaded[path].shape[1], loaded[path].shape[0])
@@ -247,10 +288,23 @@ def run_alignment(
         fit_canvas = _compute_fit_canvas(fit_inputs)
         fit_width, fit_height, origin_x, origin_y = fit_canvas
         fit_origin = (origin_x, origin_y)
-        log(f"Fit canvas: x={origin_x:.2f}, y={origin_y:.2f}, w={fit_width}, h={fit_height}")
+        log(
+            f"Fit canvas: x={origin_x:.2f}, y={origin_y:.2f}, "
+            f"w={fit_width}, h={fit_height}"
+        )
 
-    # Reference is also part of successful; valid_masks includes its identity warp.
+    if crop_rect is not None:
+        output_width, output_height = crop_rect[2], crop_rect[3]
+    elif fit_canvas is not None:
+        output_width, output_height = fit_canvas[0], fit_canvas[1]
+    else:
+        output_width, output_height = ref_width, ref_height
+    output_size = (output_width, output_height)
+
+    # Render aligned files in input order. The RenderedFrame metadata lets us
+    # reconstruct valid-pixel masks later without storing all masks in memory.
     stem_counts: dict[str, int] = {}
+    rendered_frames: list[RenderedFrame] = []
     for path, _, transform_full in successful:
         if crop_rect is not None:
             x, y, w, h = crop_rect
@@ -262,10 +316,13 @@ def run_alignment(
                 borderMode=cv2.BORDER_CONSTANT,
                 borderValue=(0, 0, 0),
             )
-            warped = warped[y:y+h, x:x+w]
+            warped = warped[y : y + h, x : x + w]
         elif fit_canvas is not None:
             fit_width, fit_height, _, _ = fit_canvas
-            offset = np.array([[1.0, 0.0, -fit_origin[0]], [0.0, 1.0, -fit_origin[1]]], dtype=np.float64)
+            offset = np.array(
+                [[1.0, 0.0, -fit_origin[0]], [0.0, 1.0, -fit_origin[1]]],
+                dtype=np.float64,
+            )
             fit_transform = offset @ np.vstack([transform_full, [0.0, 0.0, 1.0]])
             warped = cv2.warpAffine(
                 loaded[path],
@@ -284,12 +341,57 @@ def run_alignment(
                 borderMode=cv2.BORDER_CONSTANT,
                 borderValue=(0, 0, 0),
             )
-        # Avoid collisions when e.g. photo.jpg and photo.png share a stem.
+
         key = path.stem
         stem_counts[key] = stem_counts.get(key, 0) + 1
         suffix = "" if stem_counts[key] == 1 else f"_{stem_counts[key]}"
-        out_name = f"{key}{suffix}.jpg"
-        _save_jpeg(aligned_dir / out_name, warped, jpeg_quality)
+        out_path = aligned_dir / f"{key}{suffix}.jpg"
+        _save_jpeg(out_path, warped, jpeg_quality)
+        rendered_frames.append(
+            RenderedFrame(
+                source_path=path,
+                output_path=out_path,
+                transform_full=transform_full,
+                source_width=loaded[path].shape[1],
+                source_height=loaded[path].shape[0],
+            )
+        )
+
+    # Derived outputs are always produced. Both image composites use geometric
+    # masks, so black source content (e.g. night scenes) is not discarded.
+    average, average_valid = create_average(
+        rendered_frames,
+        reference_size=(ref_width, ref_height),
+        crop=crop,
+        crop_rect=crop_rect,
+        fit_origin=fit_origin,
+        output_size=output_size,
+    )
+    average_path = output_dir / "average.jpg"
+    _save_jpeg(average_path, average, jpeg_quality)
+    log(f"Average image: {average_path.name} ({int(np.count_nonzero(average_valid > 0))} valid pixels)")
+
+    mosaic, polygons_placed = create_mosaic(
+        rendered_frames,
+        reference_size=(ref_width, ref_height),
+        crop=crop,
+        crop_rect=crop_rect,
+        fit_origin=fit_origin,
+        output_size=output_size,
+        polygon_count=mosaic_polygons,
+        seed=mosaic_seed,
+    )
+    mosaic_path = output_dir / "mosaic.jpg"
+    _save_jpeg(mosaic_path, mosaic, jpeg_quality)
+    log(f"Mosaic image: {mosaic_path.name} ({polygons_placed} polygons placed)")
+
+    video_path = output_dir / "video.mp4"
+    create_video(
+        [frame.output_path for frame in rendered_frames],
+        video_path,
+        duration=duration,
+    )
+    log(f"Video: {video_path.name} ({duration:g}s per image)")
 
     summary = {
         "input_directory": str(input_dir.resolve()),
@@ -303,8 +405,16 @@ def run_alignment(
         "missing_timestamps": [p.name for p in missing_timestamps],
         "working_size": working_size,
         "crop": crop,
-        "output_resolution": ([crop_rect[2], crop_rect[3]] if crop_rect else [fit_canvas[0], fit_canvas[1]] if fit_canvas else [ref_width, ref_height]),
+        "output_resolution": [output_width, output_height],
         "output_origin_reference": [fit_origin[0], fit_origin[1]],
+        "video": str(video_path.name),
+        "duration_seconds_per_image": duration,
+        "average": str(average_path.name),
+        "average_valid_pixel_count": int(np.count_nonzero(average_valid > 0)),
+        "mosaic": str(mosaic_path.name),
+        "mosaic_polygons_requested": mosaic_polygons,
+        "mosaic_polygons_placed": polygons_placed,
+        "mosaic_seed": mosaic_seed,
     }
     write_metrics(output_dir / "metrics.json", metrics)
     write_metrics(output_dir / "summary.json", [summary])

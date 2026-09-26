@@ -36,6 +36,12 @@ def build_parser() -> argparse.ArgumentParser:
                        help="SIFT Lowe ratio threshold (default: 0.75)")
     align.add_argument("--ransac-threshold", type=float, default=4.0,
                        help="RANSAC reprojection threshold in working-image pixels (default: 4)")
+    align.add_argument("--duration", type=float, default=0.5,
+                       help="Seconds each aligned image is shown in the video (default: 0.5)")
+    align.add_argument("--mosaic-polygons", type=int, default=50,
+                       help="Number of random polygons to place in the mosaic (default: 50)")
+    align.add_argument("--mosaic-seed", type=int, default=None,
+                       help="Optional random seed for reproducible mosaics")
     return parser
 
 
@@ -46,6 +52,16 @@ def main(argv: list[str] | None = None) -> None:
     if args.command == "align":
         if not 1 <= args.jpeg_quality <= 100:
             parser.error("--jpeg-quality must be between 1 and 100")
+        if args.working_size <= 0:
+            parser.error("--working-size must be greater than zero")
+        if args.duration <= 0:
+            parser.error("--duration must be greater than zero")
+        if args.mosaic_polygons < 0:
+            parser.error("--mosaic-polygons must be zero or greater")
+        if not 0 < args.ratio_threshold < 1:
+            parser.error("--ratio-threshold must be between 0 and 1")
+        if args.ransac_threshold <= 0:
+            parser.error("--ransac-threshold must be greater than zero")
         try:
             run_alignment(
                 input_dir=args.input,
@@ -59,6 +75,9 @@ def main(argv: list[str] | None = None) -> None:
                 min_matches=args.min_matches,
                 ratio_threshold=args.ratio_threshold,
                 ransac_threshold=args.ransac_threshold,
+                duration=args.duration,
+                mosaic_polygons=args.mosaic_polygons,
+                mosaic_seed=args.mosaic_seed,
             )
         except (OSError, ValueError, RuntimeError) as exc:
             parser.exit(1, f"viewalign: error: {exc}\n")

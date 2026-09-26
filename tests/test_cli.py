@@ -7,6 +7,9 @@ def test_align_parser_defaults() -> None:
     assert args.reference == "first"
     assert args.order == "filename"
     assert args.crop == "fit"
+    assert args.duration == 0.5
+    assert not hasattr(args, "ffmpeg_path")
+    assert args.mosaic_polygons == 50
     assert args.diagnostics is False
 
 
