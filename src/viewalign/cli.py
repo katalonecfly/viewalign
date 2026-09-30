@@ -10,7 +10,7 @@ from .pipeline import run_alignment
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="viewalign",
-        description="Align photos taken from approximately the same viewpoint to a common reference.",
+        description="Align photos taken from approximately the same viewpoint to a common coordinate system.",
     )
     parser.add_argument("--version", action="version", version=__version__)
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -18,8 +18,11 @@ def build_parser() -> argparse.ArgumentParser:
     align = subparsers.add_parser("align", help="Align a directory of JPEG/PNG photos")
     align.add_argument("--input", type=Path, required=True, help="Input directory")
     align.add_argument("--output", type=Path, required=True, help="Output directory")
-    align.add_argument("--reference", default="first",
-                       help="Reference: first, middle, or a path to one of the input images")
+    align.add_argument(
+        "--reference",
+        default="first",
+        help="Reference: first, middle, global, or a path to one of the input images",
+    )
     align.add_argument("--order", choices=("filename", "timestamp"), default="filename",
                        help="Input ordering (default: filename)")
     align.add_argument("--working-size", type=int, default=1600,

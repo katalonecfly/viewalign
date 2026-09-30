@@ -1,12 +1,20 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Callable
 
 import cv2
 import numpy as np
 
-from .alignment import AlignmentResult, SIFTAligner, scale_affine_to_full_resolution
+from .alignment import (
+    AlignmentResult,
+    SIFTAligner,
+    SimilarityEdge,
+    filter_global_similarity_edges,
+    scale_affine_to_full_resolution,
+    solve_global_similarity_transforms,
+)
 from .derived import RenderedFrame, create_average, create_mosaic
 from .diagnostics import draw_matches, save_overlay, write_metrics
 from .images import discover_images, load_oriented_bgr, resize_for_working
@@ -21,25 +29,10 @@ def _save_jpeg(path: Path, image: np.ndarray, quality: int) -> None:
         raise OSError(f"Could not write image: {path}")
 
 
-def _working_to_full_crop(crop: tuple[int, int, int, int], reference_scale: float,
-                          output_width: int, output_height: int) -> tuple[int, int, int, int]:
-    x, y, w, h = crop
-    x0 = max(0, int(np.floor(x / reference_scale)))
-    y0 = max(0, int(np.floor(y / reference_scale)))
-    x1 = min(output_width, int(np.ceil((x + w) / reference_scale)))
-    y1 = min(output_height, int(np.ceil((y + h) / reference_scale)))
-    return x0, y0, max(1, x1 - x0), max(1, y1 - y0)
-
-
 def _compute_fit_canvas(
     transforms: list[tuple[np.ndarray, int, int]],
 ) -> tuple[int, int, float, float]:
-    """Return a canvas that fully contains all transformed source images.
-
-    Each transform maps source-image coordinates into the reference coordinate
-    system. The returned origin is expressed in reference coordinates; callers
-    translate all transforms by (-min_x, -min_y) before warping.
-    """
+    """Return a canvas that fully contains all transformed source images."""
     if not transforms:
         raise ValueError("No transforms available for fit canvas")
 
@@ -68,9 +61,6 @@ def _compute_fit_canvas(
 
 def _compute_intersection_crop(
     valid_masks: list[np.ndarray],
-    reference_scale: float,
-    output_width: int,
-    output_height: int,
 ) -> tuple[int, int, int, int] | None:
     if not valid_masks:
         return None
@@ -81,7 +71,7 @@ def _compute_intersection_crop(
     if coords is None:
         return None
     x, y, w, h = cv2.boundingRect(coords)
-    return _working_to_full_crop((x, y, w, h), reference_scale, output_width, output_height)
+    return x, y, w, h
 
 
 def _resolve_reference(paths: list[Path], reference: str) -> Path:
@@ -97,6 +87,117 @@ def _resolve_reference(paths: list[Path], reference: str) -> Path:
     if not matches:
         raise ValueError("Reference image must be one of the input images")
     return matches[0]
+
+
+def _edge_weight(result: AlignmentResult) -> float:
+    """Convert pairwise match quality into a positive global-optimization weight."""
+    reprojection = max(result.reprojection_error or 1.0, 0.5)
+    return max(1.0, float(result.inlier_count)) * max(result.inlier_ratio, 0.05) / reprojection
+
+
+def _connected_component(node_count: int, edges: list[SimilarityEdge], start: int) -> set[int]:
+    adjacency = [set() for _ in range(node_count)]
+    for edge in edges:
+        adjacency[edge.source].add(edge.target)
+        adjacency[edge.target].add(edge.source)
+
+    seen = {start}
+    stack = [start]
+    while stack:
+        current = stack.pop()
+        for neighbor in adjacency[current]:
+            if neighbor not in seen:
+                seen.add(neighbor)
+                stack.append(neighbor)
+    return seen
+
+
+def _global_components(node_count: int, edges: list[SimilarityEdge]) -> list[set[int]]:
+    adjacency = [set() for _ in range(node_count)]
+    for edge in edges:
+        adjacency[edge.source].add(edge.target)
+        adjacency[edge.target].add(edge.source)
+
+    components: list[set[int]] = []
+    remaining = set(range(node_count))
+    while remaining:
+        start = min(remaining)
+        component = {start}
+        stack = [start]
+        while stack:
+            current = stack.pop()
+            for neighbor in adjacency[current]:
+                if neighbor not in component:
+                    component.add(neighbor)
+                    stack.append(neighbor)
+        components.append(component)
+        remaining -= component
+    return components
+
+
+def _pairwise_record(
+    source: Path,
+    target: Path,
+    result: AlignmentResult,
+    transform_full: np.ndarray | None,
+    *,
+    derived_inverse: bool = False,
+) -> dict:
+    record = {
+        "source": source.name,
+        "target": target.name,
+        "status": "ok" if result.success and transform_full is not None else "rejected",
+        "feature_count_source": result.feature_count,
+        "match_count": result.match_count,
+        "inlier_count": result.inlier_count,
+        "inlier_ratio": result.inlier_ratio,
+        "reprojection_error_px_working": result.reprojection_error,
+        "rotation_degrees": result.rotation_degrees,
+        "scale": result.scale,
+        "translation_x_px_working": result.translation_x,
+        "translation_y_px_working": result.translation_y,
+        "derived_inverse": derived_inverse,
+    }
+    if transform_full is not None:
+        record["transform_full_resolution"] = transform_full.tolist()
+    if not result.success:
+        record["reason"] = result.reason
+    return record
+
+
+def _invert_affine(matrix: np.ndarray) -> np.ndarray | None:
+    matrix = np.asarray(matrix, dtype=np.float64)
+    if matrix.shape != (2, 3) or not np.all(np.isfinite(matrix)):
+        return None
+    linear = matrix[:, :2]
+    determinant = float(np.linalg.det(linear))
+    if not np.isfinite(determinant) or abs(determinant) <= 1e-12:
+        return None
+    inverse = cv2.invertAffineTransform(matrix)
+    if inverse is None or not np.all(np.isfinite(inverse)):
+        return None
+    return inverse
+
+
+def _write_json(path: Path, data: object) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+
+
+def _identity_result(feature_count: int) -> AlignmentResult:
+    return AlignmentResult(
+        True,
+        np.array([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]], dtype=np.float64),
+        feature_count,
+        feature_count,
+        feature_count,
+        1.0,
+        0.0,
+        0.0,
+        1.0,
+        0.0,
+        0.0,
+    )
 
 
 def run_alignment(
@@ -124,13 +225,19 @@ def run_alignment(
         raise ValueError("duration must be greater than zero")
     if mosaic_polygons < 0:
         raise ValueError("mosaic_polygons must be non-negative")
+    if reference != "global" and reference not in {"first", "middle"}:
+        # Validate path references early; global is the special reference-free mode.
+        _resolve_reference(paths, reference)
     if video_order not in {"random", "brightness", "center"}:
         raise ValueError(f"Unknown video order: {video_order}")
 
     ordered, missing_timestamps = order_images(paths, order)
     if missing_timestamps and order == "timestamp":
         log(f"Warning: {len(missing_timestamps)} image(s) have no EXIF timestamp; they are sorted last")
-    reference_path = _resolve_reference(ordered, reference)
+
+    reference_path: Path | None = None
+    if reference != "global":
+        reference_path = _resolve_reference(ordered, reference)
 
     output_dir.mkdir(parents=True, exist_ok=True)
     aligned_dir = output_dir / "aligned"
@@ -146,10 +253,12 @@ def run_alignment(
     metrics: list[dict] = []
 
     log(f"Found {len(ordered)} images")
-    log(f"Reference: {reference_path.name}")
+    if reference == "global":
+        log("Reference: global (pairwise alignment graph)")
+    else:
+        assert reference_path is not None
+        log(f"Reference: {reference_path.name}")
     log("Loading images...")
-
-    log("Aligning images...")
     for path in ordered:
         try:
             image = load_oriented_bgr(path)
@@ -162,123 +271,357 @@ def run_alignment(
         working[path] = work
         scales[path] = scale
 
-    if reference_path not in loaded:
-        raise RuntimeError("Reference image could not be loaded")
-
-    reference_image = loaded[reference_path]
-    reference_work = working[reference_path]
-    reference_scale = scales[reference_path]
-    ref_height, ref_width = reference_image.shape[:2]
+    if len(loaded) < 2:
+        raise RuntimeError("Fewer than two images could be loaded")
 
     aligner = SIFTAligner(
         ratio_threshold=ratio_threshold,
         ransac_threshold=ransac_threshold,
         min_matches=min_matches,
     )
-    reference_keypoints, reference_descriptors = aligner.describe(reference_work)
-    if reference_descriptors is None or len(reference_keypoints) < 2:
-        raise RuntimeError("Reference image has insufficient SIFT features")
 
     successful: list[tuple[Path, AlignmentResult, np.ndarray]] = []
     valid_masks: list[np.ndarray] = []
+    pairwise_matrix: list[list[dict | None]] | None = None
+    pairwise_successful_edges: list[SimilarityEdge] = []
+    global_anchor_path: Path | None = None
 
-    for path in ordered:
-        if path not in loaded:
-            continue
-        if path == reference_path:
-            matrix_work = np.array([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]], dtype=np.float64)
-            result = AlignmentResult(
-                True,
-                matrix_work,
-                len(reference_keypoints),
-                len(reference_keypoints),
-                len(reference_keypoints),
-                1.0,
-                0.0,
-                0.0,
-                1.0,
-                0.0,
-                0.0,
-            )
-        else:
-            result = aligner.align(reference_keypoints, reference_descriptors, working[path])
-
-        item = {
-            "file": path.name,
-            "reference": path == reference_path,
-            "status": "ok" if result.success else "rejected",
-            "feature_count": result.feature_count,
-            "match_count": result.match_count,
-            "inlier_count": result.inlier_count,
-            "inlier_ratio": result.inlier_ratio,
-            "reprojection_error_px_working": result.reprojection_error,
-            "rotation_degrees": result.rotation_degrees,
-            "scale": result.scale,
-            "translation_x_px_working": result.translation_x,
-            "translation_y_px_working": result.translation_y,
+    if reference == "global":
+        log("Detecting SIFT features...")
+        described: dict[Path, tuple[list[cv2.KeyPoint], np.ndarray | None]] = {
+            path: aligner.describe(working[path]) for path in loaded
         }
+        valid_paths = [path for path in ordered if path in loaded]
+        index_by_path = {path: index for index, path in enumerate(valid_paths)}
+        pairwise_matrix = [[None for _ in valid_paths] for _ in valid_paths]
+        pair_count = len(valid_paths) * (len(valid_paths) - 1) // 2
+        log(f"Computing pairwise alignments ({pair_count} pairs)...")
 
-        if not result.success or result.transform is None:
-            item["reason"] = result.reason
+        for i, source in enumerate(valid_paths):
+            source_kp, source_desc = described[source]
+            for j in range(i + 1, len(valid_paths)):
+                target = valid_paths[j]
+                target_kp, target_desc = described[target]
+                result = aligner.align_described(
+                    target_kp,
+                    target_desc if target_desc is not None else np.empty((0, 128), dtype=np.float32),
+                    source_kp,
+                    source_desc,
+                )
+
+                transform_full: np.ndarray | None = None
+                if result.success and result.transform is not None and target_desc is not None:
+                    candidate_transform = scale_affine_to_full_resolution(
+                        result.transform, scales[source], scales[target]
+                    )
+                    inverse_candidate = _invert_affine(candidate_transform)
+                    if inverse_candidate is not None:
+                        transform_full = candidate_transform
+                        edge = SimilarityEdge(
+                            i,
+                            j,
+                            transform_full,
+                            _edge_weight(result),
+                            result,
+                        )
+                        pairwise_successful_edges.append(edge)
+                    else:
+                        result = AlignmentResult(
+                            False,
+                            candidate_transform,
+                            result.feature_count,
+                            result.match_count,
+                            result.inlier_count,
+                            result.inlier_ratio,
+                            result.reprojection_error,
+                            result.rotation_degrees,
+                            result.scale,
+                            result.translation_x,
+                            result.translation_y,
+                            reason="estimated similarity transform is not invertible",
+                            good_matches=result.good_matches,
+                            keypoints_reference=result.keypoints_reference,
+                            keypoints_image=result.keypoints_image,
+                        )
+
+                record = _pairwise_record(source, target, result, transform_full)
+                pairwise_matrix[i][j] = record
+                if transform_full is not None:
+                    inverse_transform = _invert_affine(transform_full)
+                    if inverse_transform is None:
+                        raise RuntimeError("Internal error: accepted pairwise transform became non-invertible")
+                    reverse_result = AlignmentResult(
+                        True,
+                        inverse_transform,
+                        result.feature_count,
+                        result.match_count,
+                        result.inlier_count,
+                        result.inlier_ratio,
+                        result.reprojection_error,
+                        -float(result.rotation_degrees or 0.0),
+                        float(1.0 / result.scale) if result.scale else None,
+                        None,
+                        None,
+                    )
+                    reverse_record = _pairwise_record(
+                        target,
+                        source,
+                        reverse_result,
+                        inverse_transform,
+                        derived_inverse=True,
+                    )
+                    reverse_record["feature_count_source"] = len(target_kp)
+                    pairwise_matrix[j][i] = reverse_record
+                else:
+                    pairwise_matrix[j][i] = {
+                        "source": target.name,
+                        "target": source.name,
+                        "status": "rejected",
+                        "derived_inverse": True,
+                        "reason": result.reason,
+                    }
+
+                if result.success and transform_full is not None:
+                    log(f"[ OK ] {source.name} <-> {target.name}: {result.inlier_count}/{result.match_count} inliers")
+                else:
+                    log(f"[REJECT] {source.name} <-> {target.name}: {result.reason}")
+
+                if diagnostics:
+                    draw_matches(
+                        diagnostics_dir / "matches" / f"{i:04d}_{j:04d}_{source.stem}__{target.stem}_matches.jpg",
+                        result,
+                        working[target],
+                        working[source],
+                    )
+
+        node_scales = [float(np.sqrt(loaded[path].shape[0] * loaded[path].shape[1])) for path in valid_paths]
+        raw_pairwise_edge_count = len(pairwise_successful_edges)
+        pairwise_successful_edges = filter_global_similarity_edges(pairwise_successful_edges, node_scales)
+        filtered_edge_count = raw_pairwise_edge_count - len(pairwise_successful_edges)
+        if filtered_edge_count:
+            log(f"Global graph: filtered {filtered_edge_count} implausible pairwise links")
+        components = _global_components(len(valid_paths), pairwise_successful_edges)
+        viable_components = [component for component in components if len(component) >= 2]
+        if not viable_components:
+            _write_json(
+                output_dir / "pairwise_metrics.json",
+                {"images": [path.name for path in valid_paths], "matrix": pairwise_matrix},
+            )
+            raise RuntimeError("No connected global alignment component could be formed")
+
+        viable_components.sort(key=lambda component: (-len(component), min(component)))
+        selected = viable_components[0]
+        global_anchor_index = min(selected)
+        global_anchor_path = valid_paths[global_anchor_index]
+        selected_edges = [
+            edge for edge in pairwise_successful_edges
+            if edge.source in selected and edge.target in selected
+        ]
+
+        log(
+            f"Global graph: {len(selected)}/{len(valid_paths)} loaded images connected; "
+            f"{len(selected_edges)} successful pairwise links"
+        )
+        if len(components) > 1:
+            log(f"Global graph: {len(components)} connected component(s); using the largest component")
+        log(f"Global anchor: {global_anchor_path.name}")
+        log("Solving global transforms...")
+        global_transforms = solve_global_similarity_transforms(
+            len(valid_paths),
+            selected_edges,
+            global_anchor_index,
+            node_scales=node_scales,
+        )
+
+        best_edge_by_node: dict[int, SimilarityEdge] = {}
+        for edge in selected_edges:
+            for node in (edge.source, edge.target):
+                current = best_edge_by_node.get(node)
+                if current is None or edge.weight > current.weight:
+                    best_edge_by_node[node] = edge
+
+        for index, path in enumerate(valid_paths):
+            if index not in selected:
+                metrics.append({
+                    "file": path.name,
+                    "status": "rejected",
+                    "reason": "not connected to the selected global alignment component",
+                    "global_anchor": global_anchor_path.name,
+                    "pairwise_edges": sum(
+                        1 for edge in pairwise_successful_edges if edge.source == index or edge.target == index
+                    ),
+                })
+                log(f"[REJECT] {path.name}: not connected to global alignment component")
+                continue
+
+            transform_full = global_transforms[index]
+            best = best_edge_by_node.get(index)
+            result_for_record = _identity_result(len(described[path][0])) if index == global_anchor_index else best.result if best else None
+            item = {
+                "file": path.name,
+                "reference": False,
+                "global_anchor": index == global_anchor_index,
+                "global_reference": global_anchor_path.name,
+                "status": "ok",
+                "pairwise_edges": sum(
+                    1 for edge in selected_edges if edge.source == index or edge.target == index
+                ),
+                "best_pairwise_inliers": result_for_record.inlier_count if result_for_record else 0,
+                "best_pairwise_matches": result_for_record.match_count if result_for_record else 0,
+                "transform_full_resolution": transform_full.tolist(),
+            }
             metrics.append(item)
-            log(f"[REJECT] {path.name}: {result.reason}")
+            successful.append((
+                path,
+                result_for_record or _identity_result(len(described[path][0])),
+                transform_full,
+            ))
+            mask = np.full(loaded[path].shape[:2], 255, dtype=np.uint8)
+            warped_mask = cv2.warpAffine(
+                mask,
+                transform_full,
+                (loaded[global_anchor_path].shape[1], loaded[global_anchor_path].shape[0]),
+                flags=cv2.INTER_NEAREST,
+                borderMode=cv2.BORDER_CONSTANT,
+                borderValue=0,
+            )
+            valid_masks.append(warped_mask)
+
+    else:
+        assert reference_path is not None
+        if reference_path not in loaded:
+            raise RuntimeError("Reference image could not be loaded")
+
+        reference_image = loaded[reference_path]
+        reference_work = working[reference_path]
+        reference_scale = scales[reference_path]
+        ref_height, ref_width = reference_image.shape[:2]
+        reference_keypoints, reference_descriptors = aligner.describe(reference_work)
+        if reference_descriptors is None or len(reference_keypoints) < 2:
+            raise RuntimeError("Reference image has insufficient SIFT features")
+
+        log("Aligning images...")
+        for path in ordered:
+            if path not in loaded:
+                continue
+            if path == reference_path:
+                result = _identity_result(len(reference_keypoints))
+            else:
+                result = aligner.align(reference_keypoints, reference_descriptors, working[path])
+
+            item = {
+                "file": path.name,
+                "reference": path == reference_path,
+                "status": "ok" if result.success else "rejected",
+                "feature_count": result.feature_count,
+                "match_count": result.match_count,
+                "inlier_count": result.inlier_count,
+                "inlier_ratio": result.inlier_ratio,
+                "reprojection_error_px_working": result.reprojection_error,
+                "rotation_degrees": result.rotation_degrees,
+                "scale": result.scale,
+                "translation_x_px_working": result.translation_x,
+                "translation_y_px_working": result.translation_y,
+            }
+
+            if not result.success or result.transform is None:
+                item["reason"] = result.reason
+                metrics.append(item)
+                log(f"[REJECT] {path.name}: {result.reason}")
+                if diagnostics:
+                    draw_matches(
+                        diagnostics_dir / "matches" / f"{path.stem}_matches.jpg",
+                        result,
+                        reference_work,
+                        working[path],
+                    )
+                continue
+
+            transform_full = scale_affine_to_full_resolution(
+                result.transform, scales[path], reference_scale
+            )
+            item["transform_full_resolution"] = transform_full.tolist()
+            metrics.append(item)
+            successful.append((path, result, transform_full))
+
+            mask = np.full(loaded[path].shape[:2], 255, dtype=np.uint8)
+            warped_mask = cv2.warpAffine(
+                mask,
+                transform_full,
+                (ref_width, ref_height),
+                flags=cv2.INTER_NEAREST,
+                borderMode=cv2.BORDER_CONSTANT,
+                borderValue=0,
+            )
+            valid_masks.append(warped_mask)
+
             if diagnostics:
+                preview_warped = cv2.warpAffine(
+                    loaded[path],
+                    transform_full,
+                    (ref_width, ref_height),
+                    flags=cv2.INTER_LINEAR,
+                    borderMode=cv2.BORDER_CONSTANT,
+                    borderValue=(0, 0, 0),
+                )
                 draw_matches(
                     diagnostics_dir / "matches" / f"{path.stem}_matches.jpg",
                     result,
                     reference_work,
                     working[path],
                 )
-            continue
-
-        transform_full = scale_affine_to_full_resolution(
-            result.transform, scales[path], reference_scale
-        )
-        preview_warped = cv2.warpAffine(
-            loaded[path],
-            transform_full,
-            (ref_width, ref_height),
-            flags=cv2.INTER_LINEAR,
-            borderMode=cv2.BORDER_CONSTANT,
-            borderValue=(0, 0, 0),
-        )
-        mask = np.full(working[path].shape[:2], 255, dtype=np.uint8)
-        warped_mask = cv2.warpAffine(
-            mask,
-            result.transform,
-            (reference_work.shape[1], reference_work.shape[0]),
-            flags=cv2.INTER_NEAREST,
-            borderMode=cv2.BORDER_CONSTANT,
-            borderValue=0,
-        )
-        valid_masks.append(warped_mask)
-        successful.append((path, result, transform_full))
-        item["transform_full_resolution"] = transform_full.tolist()
-        metrics.append(item)
-        if diagnostics:
-            draw_matches(
-                diagnostics_dir / "matches" / f"{path.stem}_matches.jpg",
-                result,
-                reference_work,
-                working[path],
-            )
-            save_overlay(
-                diagnostics_dir / "overlays" / f"{path.stem}_overlay.jpg",
-                reference_image,
-                preview_warped,
-            )
-        log(f"[ OK ] {path.name}: {result.inlier_count}/{result.match_count} inliers")
+                save_overlay(
+                    diagnostics_dir / "overlays" / f"{path.stem}_overlay.jpg",
+                    reference_image,
+                    preview_warped,
+                )
+            log(f"[ OK ] {path.name}: {result.inlier_count}/{result.match_count} inliers")
 
     if not successful:
         raise RuntimeError("No images could be aligned")
+
+    if reference_path is None:
+        assert global_anchor_path is not None
+        reference_path = global_anchor_path
+    reference_image = loaded[reference_path]
+    ref_height, ref_width = reference_image.shape[:2]
+
+    if reference == "global":
+        # Global mode reports pairwise measurements separately from final per-image metrics.
+        assert pairwise_matrix is not None
+        valid_paths = [path for path in ordered if path in loaded]
+        _write_json(
+            output_dir / "pairwise_metrics.json",
+            {
+                "images": [path.name for path in valid_paths],
+                "matrix": pairwise_matrix,
+                "successful_pairwise_links": len(pairwise_successful_edges),
+                "global_anchor": reference_path.name,
+            },
+        )
+
+        # Add final overlays against the global anchor after solving.
+        if diagnostics:
+            for path, _, transform_full in successful:
+                aligned_preview = cv2.warpAffine(
+                    loaded[path],
+                    transform_full,
+                    (ref_width, ref_height),
+                    flags=cv2.INTER_LINEAR,
+                    borderMode=cv2.BORDER_CONSTANT,
+                    borderValue=(0, 0, 0),
+                )
+                save_overlay(
+                    diagnostics_dir / "overlays" / f"{path.stem}_global_overlay.jpg",
+                    reference_image,
+                    aligned_preview,
+                )
 
     crop_rect = None
     fit_canvas = None
     fit_origin = (0.0, 0.0)
     if crop == "intersection":
-        crop_rect = _compute_intersection_crop(
-            valid_masks, reference_scale, ref_width, ref_height
-        )
+        crop_rect = _compute_intersection_crop(valid_masks)
         if crop_rect is None:
             raise RuntimeError("Could not compute a non-empty common intersection crop")
         log(
@@ -307,8 +650,6 @@ def run_alignment(
     output_size = (output_width, output_height)
 
     log("Rendering aligned images...")
-    # Render aligned files in input order. The RenderedFrame metadata lets us
-    # reconstruct valid-pixel masks later without storing all masks in memory.
     stem_counts: dict[str, int] = {}
     rendered_frames: list[RenderedFrame] = []
     for path, _, transform_full in successful:
@@ -363,8 +704,6 @@ def run_alignment(
             )
         )
 
-    # Derived outputs are always produced. Both image composites use geometric
-    # masks, so black source content (e.g. night scenes) is not discarded.
     log("Creating average image...")
     average, average_valid = create_average(
         rendered_frames,
@@ -416,6 +755,7 @@ def run_alignment(
         "input_directory": str(input_dir.resolve()),
         "output_directory": str(output_dir.resolve()),
         "reference": reference_path.name,
+        "reference_mode": reference,
         "order": order,
         "images_found": len(paths),
         "images_loaded": len(loaded),
@@ -436,6 +776,11 @@ def run_alignment(
         "mosaic_polygons_placed": polygons_placed,
         "mosaic_seed": mosaic_seed,
     }
+    if reference == "global":
+        summary["global_anchor"] = reference_path.name
+        summary["pairwise_metrics"] = "pairwise_metrics.json"
+        summary["successful_pairwise_links"] = len(pairwise_successful_edges)
+
     write_metrics(output_dir / "metrics.json", metrics)
     write_metrics(output_dir / "summary.json", [summary])
     log(f"Aligned {len(successful)}/{len(ordered)} images")

@@ -30,3 +30,18 @@ def test_video_order_modes() -> None:
             "align", "--input", "photos", "--output", "out", "--video-order", mode,
         ])
         assert args.video_order == mode
+
+
+
+def test_global_reference_option() -> None:
+    parser = build_parser()
+    args = parser.parse_args([
+        "align", "--input", "photos", "--output", "out", "--reference", "global",
+    ])
+    assert args.reference == "global"
+
+
+def test_version_is_0_4_2() -> None:
+    from viewalign import __version__
+
+    assert __version__ == "0.4.2"

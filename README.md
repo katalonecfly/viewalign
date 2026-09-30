@@ -1,6 +1,6 @@
 # viewalign
 
-A small cross-platform CLI for aligning photos taken from approximately the same viewpoint to a common reference image.
+A small cross-platform CLI for aligning photos taken from approximately the same viewpoint to a common coordinate system.
 
 The current version uses SIFT feature matching and a RANSAC-estimated similarity transform (`cv2.estimateAffinePartial2D`). It supports JPEG/PNG input, EXIF orientation normalization, filename/timestamp ordering, different input resolutions/orientations, JPEG output, alignment diagnostics, a black-aware average image, a random polygon mosaic, and FFmpeg video generation with configurable frame ordering.
 
@@ -48,6 +48,27 @@ uv run viewalign align \
 ```
 
 The command continues when an individual image cannot be aligned. A `metrics.json` file is written to the output directory.
+
+## Reference modes
+
+By default, ViewAlign aligns every image directly to a chosen reference image:
+
+- `--reference first` uses the first image after the selected input ordering.
+- `--reference middle` uses the middle image.
+- `--reference <path>` uses a specific input image.
+- `--reference global` performs reference-free global alignment.
+
+### Global alignment
+
+`--reference global` first computes pairwise similarity transforms between every unordered pair of loaded images. The other direction is represented by the inverse transform, so `N` images require `N(N-1)/2` feature-matching attempts rather than twice that number.
+
+Successful pairwise matches form an alignment graph. ViewAlign finds its connected components, selects the largest component, and solves one global similarity transform per image using all successful pairwise measurements in that component. Pairwise coordinates are normalized by each image's size before the global solve, which prevents differences in image resolution and pathological scale estimates from making the global canvas explode. Higher-quality pairwise measurements receive higher weights, and several robust reweighting passes reduce the influence of inconsistent edges.
+
+This means an image does not have to match one particular reference image directly. It can still be included when it connects reliably through other images. Images outside the selected connected component are rejected instead of being forced into the common coordinate system.
+
+The pairwise measurements are stored in `pairwise_metrics.json` as a two-dimensional matrix indexed by the listed image names. Each successful unordered pair has an estimated transform in one direction and a derived inverse in the other matrix cell.
+
+Global mode chooses a deterministic anchor image only to define the final coordinate system; it is not used as the sole source of alignment measurements.
 
 ## Crop modes
 
