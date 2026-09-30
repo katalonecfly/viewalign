@@ -38,6 +38,8 @@ def build_parser() -> argparse.ArgumentParser:
                        help="RANSAC reprojection threshold in working-image pixels (default: 4)")
     align.add_argument("--duration", type=float, default=0.5,
                        help="Seconds each aligned image is shown in the video (default: 0.5)")
+    align.add_argument("--video-order", choices=("random", "brightness", "center"), default="random",
+                       help="Video order: random, brightness (lightest to darkest), or center (left to right) (default: random)")
     align.add_argument("--mosaic-polygons", type=int, default=50,
                        help="Number of random polygons to place in the mosaic (default: 50)")
     align.add_argument("--mosaic-seed", type=int, default=None,
@@ -76,6 +78,7 @@ def main(argv: list[str] | None = None) -> None:
                 ratio_threshold=args.ratio_threshold,
                 ransac_threshold=args.ransac_threshold,
                 duration=args.duration,
+                video_order=args.video_order,
                 mosaic_polygons=args.mosaic_polygons,
                 mosaic_seed=args.mosaic_seed,
             )

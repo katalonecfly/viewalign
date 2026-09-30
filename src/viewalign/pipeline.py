@@ -10,7 +10,7 @@ from .alignment import AlignmentResult, SIFTAligner, scale_affine_to_full_resolu
 from .derived import RenderedFrame, create_average, create_mosaic
 from .diagnostics import draw_matches, save_overlay, write_metrics
 from .images import discover_images, load_oriented_bgr, resize_for_working
-from .ordering import order_images
+from .ordering import order_images, order_rendered_frames
 from .video import create_video
 
 
@@ -112,6 +112,7 @@ def run_alignment(
     ratio_threshold: float = 0.75,
     ransac_threshold: float = 4.0,
     duration: float = 0.5,
+    video_order: str = "random",
     mosaic_polygons: int = 50,
     mosaic_seed: int | None = None,
     log: Callable[[str], None] = print,
@@ -123,6 +124,8 @@ def run_alignment(
         raise ValueError("duration must be greater than zero")
     if mosaic_polygons < 0:
         raise ValueError("mosaic_polygons must be non-negative")
+    if video_order not in {"random", "brightness", "center"}:
+        raise ValueError(f"Unknown video order: {video_order}")
 
     ordered, missing_timestamps = order_images(paths, order)
     if missing_timestamps and order == "timestamp":
@@ -144,7 +147,9 @@ def run_alignment(
 
     log(f"Found {len(ordered)} images")
     log(f"Reference: {reference_path.name}")
+    log("Loading images...")
 
+    log("Aligning images...")
     for path in ordered:
         try:
             image = load_oriented_bgr(path)
@@ -301,6 +306,7 @@ def run_alignment(
         output_width, output_height = ref_width, ref_height
     output_size = (output_width, output_height)
 
+    log("Rendering aligned images...")
     # Render aligned files in input order. The RenderedFrame metadata lets us
     # reconstruct valid-pixel masks later without storing all masks in memory.
     stem_counts: dict[str, int] = {}
@@ -359,6 +365,7 @@ def run_alignment(
 
     # Derived outputs are always produced. Both image composites use geometric
     # masks, so black source content (e.g. night scenes) is not discarded.
+    log("Creating average image...")
     average, average_valid = create_average(
         rendered_frames,
         reference_size=(ref_width, ref_height),
@@ -371,6 +378,7 @@ def run_alignment(
     _save_jpeg(average_path, average, jpeg_quality)
     log(f"Average image: {average_path.name} ({int(np.count_nonzero(average_valid > 0))} valid pixels)")
 
+    log("Creating mosaic image...")
     mosaic, polygons_placed = create_mosaic(
         rendered_frames,
         reference_size=(ref_width, ref_height),
@@ -385,9 +393,20 @@ def run_alignment(
     _save_jpeg(mosaic_path, mosaic, jpeg_quality)
     log(f"Mosaic image: {mosaic_path.name} ({polygons_placed} polygons placed)")
 
+    video_frames = order_rendered_frames(
+        rendered_frames,
+        video_order,
+        reference_size=(ref_width, ref_height),
+        crop=crop,
+        crop_rect=crop_rect,
+        fit_origin=fit_origin,
+        output_size=output_size,
+    )
+    log(f"Video order: {video_order} ({len(video_frames)} images)")
+    log("Creating video...")
     video_path = output_dir / "video.mp4"
     create_video(
-        [frame.output_path for frame in rendered_frames],
+        [frame.output_path for frame in video_frames],
         video_path,
         duration=duration,
     )
@@ -408,6 +427,7 @@ def run_alignment(
         "output_resolution": [output_width, output_height],
         "output_origin_reference": [fit_origin[0], fit_origin[1]],
         "video": str(video_path.name),
+        "video_order": video_order,
         "duration_seconds_per_image": duration,
         "average": str(average_path.name),
         "average_valid_pixel_count": int(np.count_nonzero(average_valid > 0)),
@@ -419,4 +439,5 @@ def run_alignment(
     write_metrics(output_dir / "metrics.json", metrics)
     write_metrics(output_dir / "summary.json", [summary])
     log(f"Aligned {len(successful)}/{len(ordered)} images")
+    log("Done.")
     return summary
