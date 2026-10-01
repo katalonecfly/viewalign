@@ -23,6 +23,8 @@ def build_parser() -> argparse.ArgumentParser:
         default="first",
         help="Reference: first, middle, global, or a path to one of the input images",
     )
+    align.add_argument("--upright", choices=("auto", "none"), default="auto",
+                       help="Global-mode upright correction: auto or none (default: auto)")
     align.add_argument("--order", choices=("filename", "timestamp"), default="filename",
                        help="Input ordering (default: filename)")
     align.add_argument("--working-size", type=int, default=1600,
@@ -72,6 +74,7 @@ def main(argv: list[str] | None = None) -> None:
                 input_dir=args.input,
                 output_dir=args.output,
                 reference=args.reference,
+                upright=args.upright,
                 order=args.order,
                 working_size=args.working_size,
                 crop=args.crop,

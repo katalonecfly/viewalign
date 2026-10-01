@@ -37,6 +37,7 @@ uv run viewalign align \
   --input ./photos \
   --output ./aligned \
   --reference first \
+  --upright auto \
   --order timestamp \
   --working-size 1600 \
   --crop fit \
@@ -58,6 +59,8 @@ By default, ViewAlign aligns every image directly to a chosen reference image:
 - `--reference <path>` uses a specific input image.
 - `--reference global` performs reference-free global alignment.
 
+For global mode, `--upright auto` is enabled by default. It estimates one scene-wide roll correction from long horizontal/vertical line structure detected across the registered images, then applies that single correction to the whole global coordinate system. `--upright none` disables this step. Fixed-reference modes are not automatically rotated, so an explicitly chosen reference image continues to define the final horizon/orientation.
+
 ### Global alignment
 
 `--reference global` first computes pairwise similarity transforms between every unordered pair of loaded images. The other direction is represented by the inverse transform, so `N` images require `N(N-1)/2` feature-matching attempts rather than twice that number.
@@ -68,7 +71,7 @@ This means an image does not have to match one particular reference image direct
 
 The pairwise measurements are stored in `pairwise_metrics.json` as a two-dimensional matrix indexed by the listed image names. Each successful unordered pair has an estimated transform in one direction and a derived inverse in the other matrix cell.
 
-Global mode chooses a deterministic anchor image only to define the final coordinate system; it is not used as the sole source of alignment measurements.
+Global mode chooses a deterministic anchor image only to define the final coordinate system; it is not used as the sole source of alignment measurements. After solving, automatic upright estimation can rotate that whole coordinate system by one common angle so the scene's strongest axis-like lines are approximately horizontal/vertical. Weak or inconsistent line evidence leaves the global orientation unchanged rather than applying an aggressive correction.
 
 ## Crop modes
 

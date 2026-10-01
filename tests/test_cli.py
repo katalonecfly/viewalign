@@ -5,6 +5,7 @@ def test_align_parser_defaults() -> None:
     parser = build_parser()
     args = parser.parse_args(["align", "--input", "photos", "--output", "out"])
     assert args.reference == "first"
+    assert args.upright == "auto"
     assert args.order == "filename"
     assert args.crop == "fit"
     assert args.duration == 0.5
@@ -41,7 +42,16 @@ def test_global_reference_option() -> None:
     assert args.reference == "global"
 
 
-def test_version_is_0_4_2() -> None:
+def test_upright_modes() -> None:
+    parser = build_parser()
+    for mode in ("auto", "none"):
+        args = parser.parse_args([
+            "align", "--input", "photos", "--output", "out", "--upright", mode,
+        ])
+        assert args.upright == mode
+
+
+def test_version_is_0_5_0() -> None:
     from viewalign import __version__
 
-    assert __version__ == "0.4.2"
+    assert __version__ == "0.5.0"

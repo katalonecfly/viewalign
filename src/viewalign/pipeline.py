@@ -20,6 +20,7 @@ from .diagnostics import draw_matches, save_overlay, write_metrics
 from .images import discover_images, load_oriented_bgr, resize_for_working
 from .ordering import order_images, order_rendered_frames
 from .video import create_video
+from .upright import UprightEstimate, apply_global_rotation, estimate_upright
 
 
 def _save_jpeg(path: Path, image: np.ndarray, quality: int) -> None:
@@ -204,6 +205,7 @@ def run_alignment(
     input_dir: Path,
     output_dir: Path,
     reference: str = "first",
+    upright: str = "auto",
     order: str = "filename",
     working_size: int = 1600,
     crop: str = "fit",
@@ -230,6 +232,8 @@ def run_alignment(
         _resolve_reference(paths, reference)
     if video_order not in {"random", "brightness", "center"}:
         raise ValueError(f"Unknown video order: {video_order}")
+    if upright not in {"auto", "none"}:
+        raise ValueError(f"Unknown upright mode: {upright}")
 
     ordered, missing_timestamps = order_images(paths, order)
     if missing_timestamps and order == "timestamp":
@@ -285,6 +289,15 @@ def run_alignment(
     pairwise_matrix: list[list[dict | None]] | None = None
     pairwise_successful_edges: list[SimilarityEdge] = []
     global_anchor_path: Path | None = None
+    upright_estimate = UprightEstimate(
+        rotation_degrees=0.0,
+        confidence="low",
+        supporting_lines=0,
+        supporting_images=0,
+        spread_degrees=0.0,
+        applied=False,
+        reason="not used",
+    )
 
     if reference == "global":
         log("Detecting SIFT features...")
@@ -432,6 +445,39 @@ def run_alignment(
             global_anchor_index,
             node_scales=node_scales,
         )
+
+        if upright == "auto":
+            log("Estimating upright orientation...")
+            upright_images = {path: working[path] for index, path in enumerate(valid_paths) if index in selected}
+            upright_transforms = {path: global_transforms[index] for index, path in enumerate(valid_paths) if index in selected}
+            upright_scales = {path: scales[path] for index, path in enumerate(valid_paths) if index in selected}
+            upright_estimate = estimate_upright(
+                upright_images,
+                upright_transforms,
+                upright_scales,
+            )
+            log(
+                f"Upright orientation: {upright_estimate.rotation_degrees:+.2f}° "
+                f"({upright_estimate.confidence} confidence, "
+                f"{upright_estimate.supporting_lines} supporting lines across "
+                f"{upright_estimate.supporting_images} images)"
+            )
+            if upright_estimate.applied:
+                corrected = apply_global_rotation(
+                    [global_transforms[index] for index in sorted(selected)],
+                    upright_estimate.rotation_degrees,
+                    center=(
+                        loaded[global_anchor_path].shape[1] / 2.0,
+                        loaded[global_anchor_path].shape[0] / 2.0,
+                    ),
+                )
+                for index, matrix in zip(sorted(selected), corrected):
+                    global_transforms[index] = matrix
+                log("Applied automatic global upright correction.")
+            else:
+                log(f"Upright correction not applied: {upright_estimate.reason}")
+        else:
+            log("Upright orientation: disabled")
 
         best_edge_by_node: dict[int, SimilarityEdge] = {}
         for edge in selected_edges:
@@ -780,6 +826,13 @@ def run_alignment(
         summary["global_anchor"] = reference_path.name
         summary["pairwise_metrics"] = "pairwise_metrics.json"
         summary["successful_pairwise_links"] = len(pairwise_successful_edges)
+        summary["upright_mode"] = upright
+        summary["upright_rotation_degrees"] = upright_estimate.rotation_degrees
+        summary["upright_confidence"] = upright_estimate.confidence
+        summary["upright_supporting_lines"] = upright_estimate.supporting_lines
+        summary["upright_supporting_images"] = upright_estimate.supporting_images
+        summary["upright_spread_degrees"] = upright_estimate.spread_degrees
+        summary["upright_applied"] = upright_estimate.applied
 
     write_metrics(output_dir / "metrics.json", metrics)
     write_metrics(output_dir / "summary.json", [summary])
