@@ -4,15 +4,31 @@ from viewalign.cli import build_parser
 def test_align_parser_defaults() -> None:
     parser = build_parser()
     args = parser.parse_args(["align", "--input", "photos", "--output", "out"])
+    assert args.command == "align"
     assert args.reference == "first"
     assert args.upright == "auto"
     assert args.order == "filename"
     assert args.crop == "fit"
-    assert args.duration == 0.5
-    assert args.video_order == "random"
-    assert not hasattr(args, "ffmpeg_path")
-    assert args.mosaic_polygons == 50
+    assert not hasattr(args, "duration")
+    assert not hasattr(args, "video_order")
+    assert not hasattr(args, "mosaic_polygons")
+    assert not hasattr(args, "mosaic_seed")
     assert args.diagnostics is False
+
+
+def test_derived_commands() -> None:
+    parser = build_parser()
+    assert parser.parse_args(["average", "--input", "out"]).command == "average"
+
+    mosaic = parser.parse_args(["mosaic", "--input", "out", "--polygons", "80", "--seed", "42"])
+    assert mosaic.command == "mosaic"
+    assert mosaic.polygons == 80
+    assert mosaic.seed == 42
+
+    video = parser.parse_args(["video", "--input", "out", "--duration", "0.75", "--order", "brightness"])
+    assert video.command == "video"
+    assert video.duration == 0.75
+    assert video.order == "brightness"
 
 
 def test_crop_modes() -> None:
@@ -28,10 +44,9 @@ def test_video_order_modes() -> None:
     parser = build_parser()
     for mode in ("random", "brightness", "center"):
         args = parser.parse_args([
-            "align", "--input", "photos", "--output", "out", "--video-order", mode,
+            "video", "--input", "out", "--order", mode,
         ])
-        assert args.video_order == mode
-
+        assert args.order == mode
 
 
 def test_global_reference_option() -> None:
@@ -51,7 +66,7 @@ def test_upright_modes() -> None:
         assert args.upright == mode
 
 
-def test_version_is_0_5_0() -> None:
+def test_version_is_0_6_0() -> None:
     from viewalign import __version__
 
-    assert __version__ == "0.5.0"
+    assert __version__ == "0.6.0"

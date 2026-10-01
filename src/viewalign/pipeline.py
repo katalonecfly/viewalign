@@ -214,24 +214,14 @@ def run_alignment(
     min_matches: int = 8,
     ratio_threshold: float = 0.75,
     ransac_threshold: float = 4.0,
-    duration: float = 0.5,
-    video_order: str = "random",
-    mosaic_polygons: int = 50,
-    mosaic_seed: int | None = None,
     log: Callable[[str], None] = print,
 ) -> dict:
     paths = discover_images(input_dir)
     if len(paths) < 2:
         raise ValueError("Need at least two supported images")
-    if duration <= 0:
-        raise ValueError("duration must be greater than zero")
-    if mosaic_polygons < 0:
-        raise ValueError("mosaic_polygons must be non-negative")
     if reference != "global" and reference not in {"first", "middle"}:
         # Validate path references early; global is the special reference-free mode.
         _resolve_reference(paths, reference)
-    if video_order not in {"random", "brightness", "center"}:
-        raise ValueError(f"Unknown video order: {video_order}")
     if upright not in {"auto", "none"}:
         raise ValueError(f"Unknown upright mode: {upright}")
 
@@ -750,52 +740,43 @@ def run_alignment(
             )
         )
 
-    log("Creating average image...")
-    average, average_valid = create_average(
-        rendered_frames,
-        reference_size=(ref_width, ref_height),
-        crop=crop,
-        crop_rect=crop_rect,
-        fit_origin=fit_origin,
-        output_size=output_size,
-    )
-    average_path = output_dir / "average.jpg"
-    _save_jpeg(average_path, average, jpeg_quality)
-    log(f"Average image: {average_path.name} ({int(np.count_nonzero(average_valid > 0))} valid pixels)")
-
-    log("Creating mosaic image...")
-    mosaic, polygons_placed = create_mosaic(
-        rendered_frames,
-        reference_size=(ref_width, ref_height),
-        crop=crop,
-        crop_rect=crop_rect,
-        fit_origin=fit_origin,
-        output_size=output_size,
-        polygon_count=mosaic_polygons,
-        seed=mosaic_seed,
-    )
-    mosaic_path = output_dir / "mosaic.jpg"
-    _save_jpeg(mosaic_path, mosaic, jpeg_quality)
-    log(f"Mosaic image: {mosaic_path.name} ({polygons_placed} polygons placed)")
-
-    video_frames = order_rendered_frames(
-        rendered_frames,
-        video_order,
-        reference_size=(ref_width, ref_height),
-        crop=crop,
-        crop_rect=crop_rect,
-        fit_origin=fit_origin,
-        output_size=output_size,
-    )
-    log(f"Video order: {video_order} ({len(video_frames)} images)")
-    log("Creating video...")
-    video_path = output_dir / "video.mp4"
-    create_video(
-        [frame.output_path for frame in video_frames],
-        video_path,
-        duration=duration,
-    )
-    log(f"Video: {video_path.name} ({duration:g}s per image)")
+    alignment_manifest = {
+        "version": 1,
+        "reference": reference_path.name,
+        "reference_mode": reference,
+        "order": order,
+        "working_size": working_size,
+        "crop": crop,
+        "jpeg_quality": jpeg_quality,
+        "reference_size": [ref_width, ref_height],
+        "output_size": [output_width, output_height],
+        "crop_rect": list(crop_rect) if crop_rect is not None else None,
+        "fit_origin": [fit_origin[0], fit_origin[1]],
+        "frames": [
+            {
+                "source": frame.source_path.name,
+                "output": str(frame.output_path.relative_to(output_dir)),
+                "source_width": frame.source_width,
+                "source_height": frame.source_height,
+                "transform_full_resolution": frame.transform_full.tolist(),
+            }
+            for frame in rendered_frames
+        ],
+    }
+    if reference == "global":
+        alignment_manifest.update({
+            "global_anchor": reference_path.name,
+            "successful_pairwise_links": len(pairwise_successful_edges),
+            "pairwise_metrics": "pairwise_metrics.json",
+            "upright_mode": upright,
+            "upright_rotation_degrees": upright_estimate.rotation_degrees,
+            "upright_confidence": upright_estimate.confidence,
+            "upright_supporting_lines": upright_estimate.supporting_lines,
+            "upright_supporting_images": upright_estimate.supporting_images,
+            "upright_spread_degrees": upright_estimate.spread_degrees,
+            "upright_applied": upright_estimate.applied,
+        })
+    _write_json(output_dir / "alignment.json", alignment_manifest)
 
     summary = {
         "input_directory": str(input_dir.resolve()),
@@ -812,15 +793,8 @@ def run_alignment(
         "crop": crop,
         "output_resolution": [output_width, output_height],
         "output_origin_reference": [fit_origin[0], fit_origin[1]],
-        "video": str(video_path.name),
-        "video_order": video_order,
-        "duration_seconds_per_image": duration,
-        "average": str(average_path.name),
-        "average_valid_pixel_count": int(np.count_nonzero(average_valid > 0)),
-        "mosaic": str(mosaic_path.name),
-        "mosaic_polygons_requested": mosaic_polygons,
-        "mosaic_polygons_placed": polygons_placed,
-        "mosaic_seed": mosaic_seed,
+        "aligned_directory": "aligned",
+        "alignment_manifest": "alignment.json",
     }
     if reference == "global":
         summary["global_anchor"] = reference_path.name
@@ -837,5 +811,177 @@ def run_alignment(
     write_metrics(output_dir / "metrics.json", metrics)
     write_metrics(output_dir / "summary.json", [summary])
     log(f"Aligned {len(successful)}/{len(ordered)} images")
+    log(f"Alignment outputs written to {output_dir}")
     log("Done.")
     return summary
+
+
+def _load_alignment_data(output_dir: Path) -> tuple[dict, list[RenderedFrame]]:
+    manifest_path = output_dir / "alignment.json"
+    if not manifest_path.exists():
+        raise FileNotFoundError(
+            f"Alignment manifest not found: {manifest_path}. Run 'viewalign align' first."
+        )
+
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"Invalid alignment manifest: {manifest_path}") from exc
+
+    if manifest.get("version") != 1:
+        raise ValueError(f"Unsupported alignment manifest version: {manifest.get('version')!r}")
+
+    try:
+        reference_size = tuple(int(value) for value in manifest["reference_size"])
+        output_size = tuple(int(value) for value in manifest["output_size"])
+        crop = str(manifest["crop"])
+        crop_rect_raw = manifest.get("crop_rect")
+        crop_rect = tuple(int(value) for value in crop_rect_raw) if crop_rect_raw is not None else None
+        fit_origin = tuple(float(value) for value in manifest["fit_origin"])
+        frame_records = manifest["frames"]
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError(f"Alignment manifest is missing required fields: {manifest_path}") from exc
+
+    if len(reference_size) != 2 or len(output_size) != 2 or len(fit_origin) != 2:
+        raise ValueError(f"Alignment manifest has invalid geometry: {manifest_path}")
+    if crop_rect is not None and len(crop_rect) != 4:
+        raise ValueError(f"Alignment manifest has invalid crop rectangle: {manifest_path}")
+    if not isinstance(frame_records, list) or not frame_records:
+        raise ValueError(f"Alignment manifest contains no aligned frames: {manifest_path}")
+
+    frames: list[RenderedFrame] = []
+    for record in frame_records:
+        try:
+            source = Path(record["source"])
+            output_path = output_dir / Path(record["output"])
+            source_width = int(record["source_width"])
+            source_height = int(record["source_height"])
+            transform = np.asarray(record["transform_full_resolution"], dtype=np.float64)
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ValueError(f"Invalid frame record in {manifest_path}") from exc
+
+        if transform.shape != (2, 3) or not np.all(np.isfinite(transform)):
+            raise ValueError(f"Invalid transform for {source.name} in {manifest_path}")
+        if not output_path.exists():
+            raise FileNotFoundError(
+                f"Aligned image not found: {output_path}. Re-run 'viewalign align' if files were moved or removed."
+            )
+        frames.append(RenderedFrame(source, output_path, transform, source_width, source_height))
+
+    normalized = {
+        "manifest": manifest,
+        "reference_size": reference_size,
+        "output_size": output_size,
+        "crop": crop,
+        "crop_rect": crop_rect,
+        "fit_origin": fit_origin,
+        "jpeg_quality": int(manifest.get("jpeg_quality", 95)),
+    }
+    return normalized, frames
+
+
+def run_average(
+    output_dir: Path,
+    *,
+    log: Callable[[str], None] = print,
+) -> dict:
+    data, frames = _load_alignment_data(output_dir)
+    log(f"Loaded alignment: {len(frames)} images")
+    log("Creating average image...")
+    average, average_valid = create_average(
+        frames,
+        reference_size=data["reference_size"],
+        crop=data["crop"],
+        crop_rect=data["crop_rect"],
+        fit_origin=data["fit_origin"],
+        output_size=data["output_size"],
+    )
+    output_path = output_dir / "average.jpg"
+    _save_jpeg(output_path, average, data["jpeg_quality"])
+    valid_pixels = int(np.count_nonzero(average_valid > 0))
+    log(f"Average image: {output_path.name} ({valid_pixels} valid pixels)")
+    log("Done.")
+    return {
+        "operation": "average",
+        "output": output_path.name,
+        "images": len(frames),
+        "valid_pixel_count": valid_pixels,
+    }
+
+
+def run_mosaic(
+    output_dir: Path,
+    *,
+    polygon_count: int = 50,
+    seed: int | None = None,
+    log: Callable[[str], None] = print,
+) -> dict:
+    if polygon_count < 0:
+        raise ValueError("polygon_count must be non-negative")
+    data, frames = _load_alignment_data(output_dir)
+    log(f"Loaded alignment: {len(frames)} images")
+    log(f"Creating mosaic image ({polygon_count} polygons)...")
+    mosaic, polygons_placed = create_mosaic(
+        frames,
+        reference_size=data["reference_size"],
+        crop=data["crop"],
+        crop_rect=data["crop_rect"],
+        fit_origin=data["fit_origin"],
+        output_size=data["output_size"],
+        polygon_count=polygon_count,
+        seed=seed,
+    )
+    output_path = output_dir / "mosaic.jpg"
+    _save_jpeg(output_path, mosaic, data["jpeg_quality"])
+    log(f"Mosaic image: {output_path.name} ({polygons_placed} polygons placed)")
+    log("Done.")
+    return {
+        "operation": "mosaic",
+        "output": output_path.name,
+        "images": len(frames),
+        "polygons_requested": polygon_count,
+        "polygons_placed": polygons_placed,
+        "seed": seed,
+    }
+
+
+def run_video(
+    output_dir: Path,
+    *,
+    duration: float = 0.5,
+    order: str = "random",
+    log: Callable[[str], None] = print,
+) -> dict:
+    if duration <= 0:
+        raise ValueError("duration must be greater than zero")
+    if order not in {"random", "brightness", "center"}:
+        raise ValueError(f"Unknown video order: {order}")
+
+    data, frames = _load_alignment_data(output_dir)
+    log(f"Loaded alignment: {len(frames)} images")
+    ordered_frames = order_rendered_frames(
+        frames,
+        order,
+        reference_size=data["reference_size"],
+        crop=data["crop"],
+        crop_rect=data["crop_rect"],
+        fit_origin=data["fit_origin"],
+        output_size=data["output_size"],
+    )
+    log(f"Video order: {order} ({len(ordered_frames)} images)")
+    log("Creating video...")
+    output_path = output_dir / "video.mp4"
+    create_video(
+        [frame.output_path for frame in ordered_frames],
+        output_path,
+        duration=duration,
+    )
+    log(f"Video: {output_path.name} ({duration:g}s per image)")
+    log("Done.")
+    return {
+        "operation": "video",
+        "output": output_path.name,
+        "images": len(ordered_frames),
+        "order": order,
+        "duration_seconds_per_image": duration,
+    }
