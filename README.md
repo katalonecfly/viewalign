@@ -38,7 +38,7 @@ Then create whichever derived outputs you want:
 
 ```bash
 uv run viewalign average --input ./output
-uv run viewalign mosaic --input ./output --polygons 80 --seed 42
+uv run viewalign mosaic --input ./output --polygons 80 --polygon-size 1.0 --seed 42
 uv run viewalign video --input ./output --duration 0.75 --order brightness
 ```
 
@@ -49,7 +49,9 @@ output/
 ├── aligned/
 ├── average.jpg
 ├── mosaic.jpg
-└── video.mp4
+├── video_random.mp4
+├── video_brightness.mp4
+└── video_center.mp4
 ```
 
 This separation means you can experiment with different mosaic seeds, polygon counts, video durations, or video ordering without running alignment again.
@@ -122,12 +124,18 @@ uv run viewalign average --input ./output
 Run:
 
 ```bash
-uv run viewalign mosaic --input ./output --polygons 50 --seed 42
+uv run viewalign mosaic --input ./output --polygons 50 --polygon-size 1.0 --seed 42
 ```
 
 `mosaic.jpg` is an independent composition made from random polygon patches from aligned frames. A polygon is only placed when nearly all of its area is valid for the selected source frame, so warped black borders are not copied into the collage.
 
 The mosaic does not use `average.jpg` as a background and can be generated even when the average image does not exist.
+
+`--polygon-size` controls the typical polygon size as a multiplier of the default size. For example, `0.5` produces smaller pieces and `2.0` produces larger pieces. It is a size scale, not an exact area.
+
+Mosaic generation is coverage-aware. Random polygons preferentially target currently uncovered regions and are clipped to geometrically valid source areas. After the random phase, a final fill pass assigns every remaining geometrically coverable pixel from an aligned frame. Therefore black remains only where no aligned source image can geometrically provide a pixel. Real black pixels from source images are still treated as valid image content.
+
+The command reports the guaranteed coverage explicitly, for example: `Mosaic coverage: 100.0% of coverable area`.
 
 ## Video
 
@@ -137,7 +145,7 @@ Run:
 uv run viewalign video --input ./output --duration 0.5 --order random
 ```
 
-`video.mp4` is generated from the aligned images. `--duration` controls how long each image is displayed. `--order` controls the sequence independently of the alignment order:
+The video command generates `video_random.mp4`, `video_brightness.mp4`, or `video_center.mp4` depending on `--order`. `--duration` controls how long each image is displayed. `--order` controls the sequence independently of the alignment order:
 
 - `random`: shuffle aligned images randomly.
 - `brightness`: sort from highest to lowest mean luminance over geometrically valid pixels, so bright daytime/snowy images tend to come first and dark/night images tend to come last.

@@ -144,7 +144,9 @@ def _random_valid_center(mask: np.ndarray, rng: random.Random) -> tuple[int, int
         if mask[py, px]:
             return px, py
     # Deterministic fallback for unusual masks with a thin valid region.
-    point = coords[rng.randrange(len(coords))][0]
+    # OpenCV may return either (N, 1, 2) or (N, 2); normalize both forms.
+    points = np.asarray(coords).reshape(-1, 2)
+    point = points[rng.randrange(len(points))]
     return int(point[0]), int(point[1])
 
 
@@ -152,10 +154,12 @@ def _make_random_polygon(
     center: tuple[int, int],
     canvas_shape: tuple[int, int],
     rng: random.Random,
+    *,
+    size_scale: float = 1.0,
 ) -> np.ndarray:
     height, width = canvas_shape
     min_dimension = min(width, height)
-    base_radius = rng.uniform(0.045, 0.12) * min_dimension
+    base_radius = rng.uniform(0.045, 0.12) * min_dimension * size_scale
     vertices = rng.randint(5, 8)
     start_angle = rng.uniform(0.0, 2.0 * np.pi)
 
@@ -170,6 +174,34 @@ def _make_random_polygon(
     return np.asarray(points, dtype=np.float32)
 
 
+def _load_frame_data(
+    frame: RenderedFrame,
+    *,
+    reference_size: tuple[int, int],
+    crop: str,
+    crop_rect: tuple[int, int, int, int] | None,
+    fit_origin: tuple[float, float],
+    output_size: tuple[int, int],
+) -> tuple[np.ndarray, np.ndarray]:
+    image = cv2.imread(str(frame.output_path), cv2.IMREAD_COLOR)
+    if image is None:
+        raise OSError(f"Could not read aligned image: {frame.output_path}")
+    if image.shape[1] != output_size[0] or image.shape[0] != output_size[1]:
+        raise ValueError(
+            f"Aligned image has unexpected size: {frame.output_path} "
+            f"({image.shape[1]}x{image.shape[0]} vs {output_size[0]}x{output_size[1]})"
+        )
+    mask = valid_mask_for_frame(
+        frame,
+        reference_size=reference_size,
+        crop=crop,
+        crop_rect=crop_rect,
+        fit_origin=fit_origin,
+        output_size=output_size,
+    )
+    return image, mask
+
+
 def create_mosaic(
     frames: Sequence[RenderedFrame],
     *,
@@ -180,36 +212,35 @@ def create_mosaic(
     output_size: tuple[int, int],
     polygon_count: int = 50,
     seed: int | None = None,
-    min_valid_coverage: float = 0.98,
-) -> tuple[np.ndarray, int]:
-    """Build a collage by replacing random polygons with random aligned frames.
+    polygon_size: float = 1.0,
+    min_valid_coverage: float = 0.20,
+) -> tuple[np.ndarray, int, int, int]:
+    """Build an independent random-polygon mosaic with guaranteed geometric coverage.
 
-    Polygons are accepted only when almost all of their area is valid for the
-    selected source frame, preventing black border pixels from entering the mosaic.
-    The background is typically the black-aware average image.
+    The random phase places clipped polygon patches preferentially in currently
+    uncovered regions. A deterministic final fill pass then assigns every remaining
+    geometrically coverable pixel from one of the aligned frames. Pixels outside the
+    union of all valid source regions remain black.
+
+    Returns ``(mosaic, polygons_placed, coverable_pixels, fill_pixels)``.
     """
     if not frames:
         raise ValueError("Cannot create a mosaic from an empty frame set")
     if polygon_count < 0:
         raise ValueError("polygon_count must be non-negative")
+    if polygon_size <= 0 or not np.isfinite(polygon_size):
+        raise ValueError("polygon_size must be greater than zero")
 
     mosaic = np.zeros((output_size[1], output_size[0], 3), dtype=np.uint8)
+    covered = np.zeros((output_size[1], output_size[0]), dtype=np.uint8)
     rng = random.Random(seed)
     cache: dict[Path, tuple[np.ndarray, np.ndarray]] = {}
     cache_order: list[Path] = []
     max_cache = min(8, len(frames))
-    placed = 0
 
-    for _ in range(polygon_count * 6):
-        if placed >= polygon_count:
-            break
-        frame = frames[rng.randrange(len(frames))]
-
+    def get_frame_data(frame: RenderedFrame) -> tuple[np.ndarray, np.ndarray]:
         if frame.output_path not in cache:
-            image = cv2.imread(str(frame.output_path), cv2.IMREAD_COLOR)
-            if image is None:
-                raise OSError(f"Could not read aligned image: {frame.output_path}")
-            mask = valid_mask_for_frame(
+            cache[frame.output_path] = _load_frame_data(
                 frame,
                 reference_size=reference_size,
                 crop=crop,
@@ -217,28 +248,91 @@ def create_mosaic(
                 fit_origin=fit_origin,
                 output_size=output_size,
             )
-            cache[frame.output_path] = (image, mask)
             cache_order.append(frame.output_path)
             if len(cache_order) > max_cache:
                 oldest = cache_order.pop(0)
                 cache.pop(oldest, None)
+        return cache[frame.output_path]
 
-        image, valid_mask = cache[frame.output_path]
-        center = _random_valid_center(valid_mask, rng)
+    # The union mask is the hard upper bound for what the mosaic can cover.
+    coverable_mask = np.zeros_like(covered)
+    for frame in frames:
+        _, valid_mask = get_frame_data(frame)
+        coverable_mask = cv2.bitwise_or(coverable_mask, valid_mask)
+
+    coverable = coverable_mask > 0
+    coverable_pixels = int(np.count_nonzero(coverable))
+    placed = 0
+
+    # The random phase is coverage-aware: choose a frame with some currently
+    # uncovered area, then place a polygon around an uncovered pixel from it.
+    max_attempts = max(1, polygon_count * 12)
+    attempts = 0
+    stagnant_attempts = 0
+    while placed < polygon_count and attempts < max_attempts:
+        attempts += 1
+        frame = frames[rng.randrange(len(frames))]
+        image, valid_mask = get_frame_data(frame)
+        target_mask = cv2.bitwise_and(valid_mask, cv2.bitwise_not(covered))
+        center = _random_valid_center(target_mask, rng)
         if center is None:
+            stagnant_attempts += 1
             continue
-        points = _make_random_polygon(center, valid_mask.shape, rng)
+
+        points = _make_random_polygon(
+            center,
+            valid_mask.shape,
+            rng,
+            size_scale=polygon_size,
+        )
         polygon_mask = _polygon_mask(valid_mask.shape, points)
         polygon_area = int(np.count_nonzero(polygon_mask))
         if polygon_area == 0:
+            stagnant_attempts += 1
             continue
 
-        covered = cv2.bitwise_and(polygon_mask, valid_mask)
-        coverage = np.count_nonzero(covered) / polygon_area
-        if coverage < min_valid_coverage:
+        # Clip polygons to the geometrically valid region. This allows a polygon
+        # to contribute useful area even when it crosses a warped-image boundary.
+        clipped = cv2.bitwise_and(polygon_mask, valid_mask)
+        newly_covered = cv2.bitwise_and(clipped, cv2.bitwise_not(covered))
+        new_pixels = int(np.count_nonzero(newly_covered))
+        coverage = new_pixels / polygon_area
+        if coverage < min_valid_coverage or new_pixels == 0:
+            stagnant_attempts += 1
             continue
 
-        mosaic[covered > 0] = image[covered > 0]
+        mosaic[newly_covered > 0] = image[newly_covered > 0]
+        covered[newly_covered > 0] = 255
         placed += 1
+        stagnant_attempts = 0
 
-    return mosaic, placed
+        if stagnant_attempts > max(50, len(frames) * 3):
+            break
+
+    # Guaranteed fill: every remaining geometrically coverable pixel is assigned
+    # from an aligned image that actually contains it. Randomize source priority
+    # so the fallback is not always biased toward the same input image.
+    remaining = cv2.bitwise_and(coverable_mask, cv2.bitwise_not(covered))
+    fill_pixels = 0
+    fill_order = list(frames)
+    rng.shuffle(fill_order)
+    for frame in fill_order:
+        if not np.any(remaining):
+            break
+        image, valid_mask = get_frame_data(frame)
+        to_fill = cv2.bitwise_and(valid_mask, remaining)
+        count = int(np.count_nonzero(to_fill))
+        if count == 0:
+            continue
+        mosaic[to_fill > 0] = image[to_fill > 0]
+        covered[to_fill > 0] = 255
+        remaining[to_fill > 0] = 0
+        fill_pixels += count
+
+    uncovered = int(np.count_nonzero(cv2.bitwise_and(coverable_mask, cv2.bitwise_not(covered))))
+    if uncovered:
+        raise RuntimeError(
+            f"Mosaic coverage fill failed: {uncovered} geometrically coverable pixels remain uncovered"
+        )
+
+    return mosaic, placed, coverable_pixels, fill_pixels

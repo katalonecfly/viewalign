@@ -1,3 +1,5 @@
+import random
+
 import cv2
 import numpy as np
 
@@ -58,7 +60,7 @@ def test_mosaic_does_not_copy_invalid_border_pixels(tmp_path) -> None:
     shift = np.array([[1.0, 0.0, 4.0], [0.0, 1.0, 0.0]], dtype=np.float64)
     frame_a = _frame(tmp_path, "a.jpg", image_a)
     frame_b = _frame(tmp_path, "b.jpg", image_b, shift)
-    mosaic, placed = create_mosaic(
+    mosaic, placed, _, _ = create_mosaic(
         [frame_a, frame_b],
         reference_size=(10, 10),
         crop="none",
@@ -79,7 +81,7 @@ def test_mosaic_does_not_use_average_as_background(tmp_path) -> None:
     image = np.full((10, 10, 3), 100, dtype=np.uint8)
     frame = _frame(tmp_path, "a.jpg", image)
 
-    mosaic, placed = create_mosaic(
+    mosaic, placed, _, _ = create_mosaic(
         [frame],
         reference_size=(10, 10),
         crop="none",
@@ -91,4 +93,60 @@ def test_mosaic_does_not_use_average_as_background(tmp_path) -> None:
     )
 
     assert placed == 0
-    assert np.all(mosaic == 0)
+    assert np.all(mosaic == 100)
+
+
+def test_mosaic_guarantees_coverable_area_is_filled(tmp_path) -> None:
+    image_a = np.zeros((4, 8, 3), dtype=np.uint8)
+    image_a[:, :6] = 100
+    image_b = np.zeros((4, 8, 3), dtype=np.uint8)
+    image_b[:, 2:8] = 200
+    shift = np.array([[1.0, 0.0, 2.0], [0.0, 1.0, 0.0]], dtype=np.float64)
+
+    path_a = tmp_path / "a.jpg"
+    path_b = tmp_path / "b.jpg"
+    assert cv2.imwrite(str(path_a), image_a)
+    assert cv2.imwrite(str(path_b), image_b)
+    frame_a = RenderedFrame(path_a, path_a, np.array([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]]), 6, 4)
+    frame_b = RenderedFrame(path_b, path_b, shift, 6, 4)
+
+    mosaic, placed, coverable, fill_pixels = create_mosaic(
+        [frame_a, frame_b],
+        reference_size=(8, 4),
+        crop="none",
+        crop_rect=None,
+        fit_origin=(0.0, 0.0),
+        output_size=(8, 4),
+        polygon_count=1,
+        seed=123,
+        polygon_size=0.5,
+    )
+
+    assert 0 <= placed <= 1
+    assert coverable == 8 * 4
+    assert fill_pixels > 0
+    assert np.all(mosaic > 0)
+
+
+def test_polygon_size_scales_polygon(tmp_path) -> None:
+    from viewalign.derived import _make_random_polygon
+
+    center = (100, 100)
+    small = _make_random_polygon(center, (400, 400), random.Random(7), size_scale=0.5)
+    large = _make_random_polygon(center, (400, 400), random.Random(7), size_scale=2.0)
+
+    small_span = float(np.ptp(small, axis=0).max())
+    large_span = float(np.ptp(large, axis=0).max())
+    assert large_span > small_span
+
+
+def test_random_valid_center_accepts_2d_find_nonzero_shape(monkeypatch):
+    import viewalign.derived as derived
+
+    mask = np.zeros((8, 8), dtype=np.uint8)
+    mask[3, 5] = 255
+
+    monkeypatch.setattr(derived.cv2, "findNonZero", lambda _mask: np.array([[5, 3]], dtype=np.int32))
+    center = derived._random_valid_center(mask, random.Random(1))
+
+    assert center == (5, 3)

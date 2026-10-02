@@ -64,11 +64,15 @@ def build_parser() -> argparse.ArgumentParser:
     mosaic.add_argument("--input", type=Path, required=True, help="Alignment output directory from 'align'")
     mosaic.add_argument(
         "--polygons", type=int, default=50,
-        help="Number of random polygons to place (default: 50)",
+        help="Number of random polygons to place before coverage fill (default: 50)",
+    )
+    mosaic.add_argument(
+        "--polygon-size", type=float, default=1.0,
+        help="Scale of the typical polygon size relative to the default (default: 1.0)",
     )
     mosaic.add_argument("--seed", type=int, default=None, help="Optional random seed for reproducible mosaics")
 
-    video = subparsers.add_parser("video", help="Create video.mp4 from an existing alignment")
+    video = subparsers.add_parser("video", help="Create video_<order>.mp4 from an existing alignment")
     video.add_argument("--input", type=Path, required=True, help="Alignment output directory from 'align'")
     video.add_argument(
         "--duration", type=float, default=0.5,
@@ -113,7 +117,14 @@ def main(argv: list[str] | None = None) -> None:
         elif args.command == "mosaic":
             if args.polygons < 0:
                 parser.error("--polygons must be zero or greater")
-            run_mosaic(args.input, polygon_count=args.polygons, seed=args.seed)
+            if args.polygon_size <= 0:
+                parser.error("--polygon-size must be greater than zero")
+            run_mosaic(
+                args.input,
+                polygon_count=args.polygons,
+                polygon_size=args.polygon_size,
+                seed=args.seed,
+            )
         elif args.command == "video":
             if args.duration <= 0:
                 parser.error("--duration must be greater than zero")

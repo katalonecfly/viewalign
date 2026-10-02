@@ -914,14 +914,19 @@ def run_mosaic(
     *,
     polygon_count: int = 50,
     seed: int | None = None,
+    polygon_size: float = 1.0,
     log: Callable[[str], None] = print,
 ) -> dict:
     if polygon_count < 0:
         raise ValueError("polygon_count must be non-negative")
+    if polygon_size <= 0:
+        raise ValueError("polygon_size must be greater than zero")
     data, frames = _load_alignment_data(output_dir)
     log(f"Loaded alignment: {len(frames)} images")
-    log(f"Creating mosaic image ({polygon_count} polygons)...")
-    mosaic, polygons_placed = create_mosaic(
+    log(
+        f"Creating mosaic image ({polygon_count} polygons, size {polygon_size:g}x)..."
+    )
+    mosaic, polygons_placed, coverable_pixels, fill_pixels = create_mosaic(
         frames,
         reference_size=data["reference_size"],
         crop=data["crop"],
@@ -930,9 +935,14 @@ def run_mosaic(
         output_size=data["output_size"],
         polygon_count=polygon_count,
         seed=seed,
+        polygon_size=polygon_size,
     )
     output_path = output_dir / "mosaic.jpg"
     _save_jpeg(output_path, mosaic, data["jpeg_quality"])
+    log(
+        f"Mosaic coverage: 100.0% of coverable area "
+        f"({coverable_pixels:,} pixels; final fill {fill_pixels:,})"
+    )
     log(f"Mosaic image: {output_path.name} ({polygons_placed} polygons placed)")
     log("Done.")
     return {
@@ -941,6 +951,10 @@ def run_mosaic(
         "images": len(frames),
         "polygons_requested": polygon_count,
         "polygons_placed": polygons_placed,
+        "polygon_size": polygon_size,
+        "coverable_pixel_count": coverable_pixels,
+        "coverage_fraction": 1.0,
+        "final_fill_pixel_count": fill_pixels,
         "seed": seed,
     }
 
@@ -970,7 +984,7 @@ def run_video(
     )
     log(f"Video order: {order} ({len(ordered_frames)} images)")
     log("Creating video...")
-    output_path = output_dir / "video.mp4"
+    output_path = output_dir / f"video_{order}.mp4"
     create_video(
         [frame.output_path for frame in ordered_frames],
         output_path,

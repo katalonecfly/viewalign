@@ -59,8 +59,10 @@ def test_derived_commands_consume_alignment_outputs(tmp_path: Path, monkeypatch)
     assert average_result["output"] == "average.jpg"
     assert (output / "average.jpg").exists()
 
-    mosaic_result = run_mosaic(output, polygon_count=0, seed=123, log=lambda _: None)
+    mosaic_result = run_mosaic(output, polygon_count=1, polygon_size=0.5, seed=123, log=lambda _: None)
     assert mosaic_result["output"] == "mosaic.jpg"
+    assert mosaic_result["polygon_size"] == 0.5
+    assert mosaic_result["coverage_fraction"] == 1.0
     assert (output / "mosaic.jpg").exists()
 
     created = {}
@@ -71,6 +73,7 @@ def test_derived_commands_consume_alignment_outputs(tmp_path: Path, monkeypatch)
 
     monkeypatch.setattr("viewalign.pipeline.create_video", fake_video)
     video_result = run_video(output, duration=0.25, order="center", log=lambda _: None)
-    assert video_result["output"] == "video.mp4"
+    assert video_result["output"] == "video_center.mp4"
     assert created["duration"] == 0.25
+    assert created["destination"].name == "video_center.mp4"
     assert [Path(path).name for path in created["paths"]] == ["frame_0.jpg", "frame_1.jpg", "frame_2.jpg"]

@@ -1,6 +1,6 @@
 [project]
 name = "viewalign"
-version = "0.6.0"
+version = "0.7.1"
 description = "Align photos taken from approximately the same viewpoint to a common reference."
 readme = "README.md"
 requires-python = ">=3.10"

@@ -23,7 +23,13 @@ def test_derived_commands() -> None:
     mosaic = parser.parse_args(["mosaic", "--input", "out", "--polygons", "80", "--seed", "42"])
     assert mosaic.command == "mosaic"
     assert mosaic.polygons == 80
+    assert mosaic.polygon_size == 1.0
     assert mosaic.seed == 42
+
+    mosaic_sized = parser.parse_args([
+        "mosaic", "--input", "out", "--polygons", "80", "--polygon-size", "1.5",
+    ])
+    assert mosaic_sized.polygon_size == 1.5
 
     video = parser.parse_args(["video", "--input", "out", "--duration", "0.75", "--order", "brightness"])
     assert video.command == "video"
@@ -66,7 +72,7 @@ def test_upright_modes() -> None:
         assert args.upright == mode
 
 
-def test_version_is_0_6_0() -> None:
+def test_version_is_0_7_0() -> None:
     from viewalign import __version__
 
-    assert __version__ == "0.6.0"
+    assert __version__ == "0.7.1"
