@@ -21,9 +21,11 @@ def test_derived_commands() -> None:
     average = parser.parse_args(["average", "--input", "out"])
     assert average.command == "average"
     assert average.min_coverage == 0.0
+    assert average.filename is None
 
     mosaic = parser.parse_args(["mosaic", "--input", "out", "--polygons", "80", "--seed", "42"])
     assert mosaic.command == "mosaic"
+    assert mosaic.filename is None
     assert mosaic.polygons == 80
     assert mosaic.polygon_size == 1.0
     assert mosaic.seed == 42
@@ -36,6 +38,7 @@ def test_derived_commands() -> None:
 
     video = parser.parse_args(["video", "--input", "out", "--duration", "0.75", "--order", "brightness"])
     assert video.command == "video"
+    assert video.filename is None
     assert video.duration == 0.75
     assert video.order == "brightness"
     assert video.min_coverage == 0.0
@@ -88,7 +91,17 @@ def test_upright_modes() -> None:
         assert args.upright == mode
 
 
-def test_version_is_0_8_0() -> None:
+def test_version_is_0_9_0() -> None:
     from viewalign import __version__
 
-    assert __version__ == "0.8.0"
+    assert __version__ == "0.9.0"
+
+
+def test_derived_filename_parser() -> None:
+    parser = build_parser()
+    average = parser.parse_args(["average", "--input", "out", "--filename", "avg.jpg"])
+    assert average.filename == "avg.jpg"
+    mosaic = parser.parse_args(["mosaic", "--input", "out", "--filename", "mosaic-custom"])
+    assert mosaic.filename == "mosaic-custom"
+    video = parser.parse_args(["video", "--input", "out", "--filename", "video.mp4"])
+    assert video.filename == "video.mp4"

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime
 from pathlib import Path
 from typing import Callable
 
@@ -28,6 +29,34 @@ from .images import discover_images, load_oriented_bgr, resize_for_working
 from .ordering import order_images, order_rendered_frames
 from .video import create_video
 from .upright import UprightEstimate, apply_global_rotation, estimate_upright
+
+
+def _generated_output_path(
+    output_dir: Path,
+    filename: str | None,
+    *,
+    suffix: str,
+    default_stem: str,
+) -> Path:
+    """Resolve a derived-output filename inside output_dir/generated."""
+    generated_dir = output_dir / "generated"
+    generated_dir.mkdir(parents=True, exist_ok=True)
+
+    if filename is None:
+        timestamp = datetime.now().astimezone().strftime("%Y%m%d_%H%M%S")
+        name = f"{timestamp}_{default_stem}{suffix}"
+    else:
+        filename_path = Path(filename)
+        if filename_path.is_absolute() or filename_path.name != filename or filename in {"", ".", ".."}:
+            raise ValueError("filename must be a simple filename, not a path")
+        name = filename
+        existing_suffix = filename_path.suffix.lower()
+        if existing_suffix and existing_suffix != suffix.lower():
+            raise ValueError(f"filename must use the {suffix} extension")
+        if not existing_suffix:
+            name = f"{name}{suffix}"
+
+    return generated_dir / name
 
 
 def _save_jpeg(path: Path, image: np.ndarray, quality: int) -> None:
@@ -935,6 +964,7 @@ def _coverage_crop_for_output(
 def run_average(
     output_dir: Path,
     *,
+    filename: str | None = None,
     min_coverage: float = 0.0,
     log: Callable[[str], None] = print,
 ) -> dict:
@@ -953,14 +983,16 @@ def run_average(
     if coverage_crop is not None:
         average = crop_image(average, coverage_crop)
         average_valid = crop_image(average_valid, coverage_crop)
-    output_path = output_dir / "average.jpg"
+    output_path = _generated_output_path(
+        output_dir, filename, suffix=".jpg", default_stem="average"
+    )
     _save_jpeg(output_path, average, data["jpeg_quality"])
     valid_pixels = int(np.count_nonzero(average_valid > 0))
     log(f"Average image: {output_path.name} ({valid_pixels} valid pixels)")
     log("Done.")
     return {
         "operation": "average",
-        "output": output_path.name,
+        "output": str(output_path.relative_to(output_dir)),
         "images": len(frames),
         "valid_pixel_count": valid_pixels,
         "min_coverage_percent": min_coverage,
@@ -974,6 +1006,7 @@ def run_mosaic(
     polygon_count: int = 50,
     seed: int | None = None,
     polygon_size: float = 1.0,
+    filename: str | None = None,
     min_coverage: float = 0.0,
     log: Callable[[str], None] = print,
 ) -> dict:
@@ -1000,7 +1033,9 @@ def run_mosaic(
     coverage_crop = _coverage_crop_for_output(data, frames, min_coverage, log=log)
     if coverage_crop is not None:
         mosaic = crop_image(mosaic, coverage_crop)
-    output_path = output_dir / "mosaic.jpg"
+    output_path = _generated_output_path(
+        output_dir, filename, suffix=".jpg", default_stem="mosaic"
+    )
     _save_jpeg(output_path, mosaic, data["jpeg_quality"])
     log(
         f"Mosaic coverage: 100.0% of coverable area "
@@ -1010,7 +1045,7 @@ def run_mosaic(
     log("Done.")
     return {
         "operation": "mosaic",
-        "output": output_path.name,
+        "output": str(output_path.relative_to(output_dir)),
         "images": len(frames),
         "polygons_requested": polygon_count,
         "polygons_placed": polygons_placed,
@@ -1029,6 +1064,7 @@ def run_video(
     *,
     duration: float = 0.5,
     order: str = "random",
+    filename: str | None = None,
     min_coverage: float = 0.0,
     log: Callable[[str], None] = print,
 ) -> dict:
@@ -1068,7 +1104,9 @@ def run_video(
             )
     log(f"Video order: {order} ({len(ordered_frames)} images)")
     log("Creating video...")
-    output_path = output_dir / f"video_{order}.mp4"
+    output_path = _generated_output_path(
+        output_dir, filename, suffix=".mp4", default_stem=f"video_{order}"
+    )
     create_video(
         [frame.output_path for frame in ordered_frames],
         output_path,
@@ -1079,7 +1117,7 @@ def run_video(
     log("Done.")
     return {
         "operation": "video",
-        "output": output_path.name,
+        "output": str(output_path.relative_to(output_dir)),
         "images": len(ordered_frames),
         "order": order,
         "duration_seconds_per_image": duration,

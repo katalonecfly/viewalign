@@ -56,14 +56,16 @@ def test_derived_commands_consume_alignment_outputs(tmp_path: Path, monkeypatch)
     output = _write_manifest(tmp_path)
 
     average_result = run_average(output, log=lambda _: None)
-    assert average_result["output"] == "average.jpg"
-    assert (output / "average.jpg").exists()
+    assert average_result["output"].startswith("generated/")
+    assert average_result["output"].endswith("_average.jpg")
+    assert (output / average_result["output"]).exists()
 
     mosaic_result = run_mosaic(output, polygon_count=1, polygon_size=0.5, seed=123, log=lambda _: None)
-    assert mosaic_result["output"] == "mosaic.jpg"
+    assert mosaic_result["output"].startswith("generated/")
+    assert mosaic_result["output"].endswith("_mosaic.jpg")
     assert mosaic_result["polygon_size"] == 0.5
     assert mosaic_result["coverage_fraction"] == 1.0
-    assert (output / "mosaic.jpg").exists()
+    assert (output / mosaic_result["output"]).exists()
 
     created = {}
     def fake_video(paths, destination, duration, crop_rect=None):
@@ -74,9 +76,10 @@ def test_derived_commands_consume_alignment_outputs(tmp_path: Path, monkeypatch)
 
     monkeypatch.setattr("viewalign.pipeline.create_video", fake_video)
     video_result = run_video(output, duration=0.25, order="center", log=lambda _: None)
-    assert video_result["output"] == "video_center.mp4"
+    assert video_result["output"].startswith("generated/")
+    assert video_result["output"].endswith("_video_center.mp4")
     assert created["duration"] == 0.25
-    assert created["destination"].name == "video_center.mp4"
+    assert created["destination"].name.endswith("_video_center.mp4")
     assert created["crop_rect"] is None
     assert [Path(path).name for path in created["paths"]] == ["frame_0.jpg", "frame_1.jpg", "frame_2.jpg"]
 
@@ -87,7 +90,7 @@ def test_derived_commands_apply_min_coverage_crop(tmp_path: Path, monkeypatch) -
     logs = []
     average_result = run_average(output, min_coverage=100.0, log=logs.append)
     assert average_result["coverage_crop"] == [2, 0, 28, 20]
-    image = cv2.imread(str(output / "average.jpg"), cv2.IMREAD_COLOR)
+    image = cv2.imread(str(output / average_result["output"]), cv2.IMREAD_COLOR)
     assert image is not None
     assert image.shape[:2] == (20, 28)
     assert any("Coverage crop: x=2, y=0, w=28, h=20" in line for line in logs)
@@ -99,3 +102,36 @@ def test_derived_commands_apply_min_coverage_crop(tmp_path: Path, monkeypatch) -
     monkeypatch.setattr("viewalign.pipeline.create_video", fake_video)
     run_video(output, min_coverage=100.0, order="random", log=lambda _: None)
     assert created["crop_rect"] == (2, 0, 28, 20)
+
+
+def test_derived_commands_custom_filenames_go_into_generated(tmp_path: Path, monkeypatch) -> None:
+    output = _write_manifest(tmp_path)
+
+    average_result = run_average(output, filename="my_average", log=lambda _: None)
+    assert average_result["output"] == "generated/my_average.jpg"
+    assert (output / "generated/my_average.jpg").exists()
+
+    mosaic_result = run_mosaic(output, polygon_count=1, filename="my_mosaic.jpg", seed=1, log=lambda _: None)
+    assert mosaic_result["output"] == "generated/my_mosaic.jpg"
+    assert (output / "generated/my_mosaic.jpg").exists()
+
+    created = {}
+    def fake_video(paths, destination, duration, crop_rect=None):
+        created["destination"] = destination
+
+    monkeypatch.setattr("viewalign.pipeline.create_video", fake_video)
+    video_result = run_video(output, filename="my_video.mp4", order="brightness", log=lambda _: None)
+    assert video_result["output"] == "generated/my_video.mp4"
+    assert created["destination"].as_posix().endswith("generated/my_video.mp4")
+
+
+def test_derived_commands_reject_wrong_filename_extension(tmp_path: Path) -> None:
+    output = _write_manifest(tmp_path)
+    import pytest
+
+    with pytest.raises(ValueError, match=r"\.jpg extension"):
+        run_average(output, filename="bad.png", log=lambda _: None)
+    with pytest.raises(ValueError, match=r"\.mp4 extension"):
+        run_video(output, filename="bad.mov", log=lambda _: None)
+    with pytest.raises(ValueError, match="simple filename"):
+        run_mosaic(output, filename="nested/foo.jpg", log=lambda _: None)

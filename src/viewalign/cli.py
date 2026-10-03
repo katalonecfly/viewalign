@@ -57,15 +57,17 @@ def build_parser() -> argparse.ArgumentParser:
         help="RANSAC reprojection threshold in working-image pixels (default: 4)",
     )
 
-    average = subparsers.add_parser("average", help="Create average.jpg from an existing alignment")
+    average = subparsers.add_parser("average", help="Create an average image from an existing alignment")
     average.add_argument("--input", type=Path, required=True, help="Alignment output directory from 'align'")
+    average.add_argument("--filename", help="Output filename inside generated/ (default: YYYYMMDD_HHMMSS_average.jpg)")
     average.add_argument(
         "--min-coverage", type=float, default=0.0,
         help="Crop output so every pixel is covered by at least this percentage of aligned images (0-100; default: 0)",
     )
 
-    mosaic = subparsers.add_parser("mosaic", help="Create mosaic.jpg from an existing alignment")
+    mosaic = subparsers.add_parser("mosaic", help="Create a mosaic image from an existing alignment")
     mosaic.add_argument("--input", type=Path, required=True, help="Alignment output directory from 'align'")
+    mosaic.add_argument("--filename", help="Output filename inside generated/ (default: YYYYMMDD_HHMMSS_mosaic.jpg)")
     mosaic.add_argument(
         "--polygons", type=int, default=50,
         help="Number of random polygons to place before coverage fill (default: 50)",
@@ -80,8 +82,9 @@ def build_parser() -> argparse.ArgumentParser:
         help="Crop output so every pixel is covered by at least this percentage of aligned images (0-100; default: 0)",
     )
 
-    video = subparsers.add_parser("video", help="Create video_<order>.mp4 from an existing alignment")
+    video = subparsers.add_parser("video", help="Create a video from an existing alignment")
     video.add_argument("--input", type=Path, required=True, help="Alignment output directory from 'align'")
+    video.add_argument("--filename", help="Output filename inside generated/ (default: YYYYMMDD_HHMMSS_video_<order>.mp4)")
     video.add_argument(
         "--duration", type=float, default=0.5,
         help="Seconds each aligned image is shown (default: 0.5)",
@@ -127,7 +130,7 @@ def main(argv: list[str] | None = None) -> None:
         elif args.command == "average":
             if not 0.0 <= args.min_coverage <= 100.0:
                 parser.error("--min-coverage must be between 0 and 100")
-            run_average(args.input, min_coverage=args.min_coverage)
+            run_average(args.input, filename=args.filename, min_coverage=args.min_coverage)
         elif args.command == "mosaic":
             if args.polygons < 0:
                 parser.error("--polygons must be zero or greater")
@@ -140,6 +143,7 @@ def main(argv: list[str] | None = None) -> None:
                 polygon_count=args.polygons,
                 polygon_size=args.polygon_size,
                 seed=args.seed,
+                filename=args.filename,
                 min_coverage=args.min_coverage,
             )
         elif args.command == "video":
@@ -151,6 +155,7 @@ def main(argv: list[str] | None = None) -> None:
                 args.input,
                 duration=args.duration,
                 order=args.order,
+                filename=args.filename,
                 min_coverage=args.min_coverage,
             )
     except (OSError, ValueError, RuntimeError, KeyError) as exc:
