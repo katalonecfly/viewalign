@@ -15,7 +15,14 @@ from .alignment import (
     scale_affine_to_full_resolution,
     solve_global_similarity_transforms,
 )
-from .derived import RenderedFrame, create_average, create_mosaic
+from .derived import (
+    RenderedFrame,
+    compute_coverage_crop,
+    compute_valid_coverage,
+    create_average,
+    create_mosaic,
+    crop_image,
+)
 from .diagnostics import draw_matches, save_overlay, write_metrics
 from .images import discover_images, load_oriented_bgr, resize_for_working
 from .ordering import order_images, order_rendered_frames
@@ -880,9 +887,55 @@ def _load_alignment_data(output_dir: Path) -> tuple[dict, list[RenderedFrame]]:
     return normalized, frames
 
 
+def _coverage_crop_for_output(
+    data: dict,
+    frames: list[RenderedFrame],
+    min_coverage: float,
+    *,
+    log: Callable[[str], None],
+) -> tuple[int, int, int, int] | None:
+    if not 0.0 <= min_coverage <= 100.0 or not np.isfinite(min_coverage):
+        raise ValueError("min_coverage must be between 0 and 100")
+    if min_coverage == 0.0:
+        log("Minimum coverage: disabled (0%)")
+        return None
+
+    coverage_counts = compute_valid_coverage(
+        frames,
+        reference_size=data["reference_size"],
+        crop=data["crop"],
+        crop_rect=data["crop_rect"],
+        fit_origin=data["fit_origin"],
+        output_size=data["output_size"],
+    )
+    crop_rect, required_images, active_pixels = compute_coverage_crop(
+        coverage_counts,
+        image_count=len(frames),
+        min_coverage=min_coverage,
+    )
+    log(
+        f"Minimum coverage: {min_coverage:g}% "
+        f"({required_images}/{len(frames)} images per pixel)"
+    )
+    if crop_rect is None:
+        log(
+            f"Warning: no pixel is covered by at least {min_coverage:g}% of images; "
+            "leaving the original canvas unchanged."
+        )
+        return None
+
+    x, y, width, height = crop_rect
+    log(
+        f"Coverage crop: x={x}, y={y}, w={width}, h={height} "
+        f"({active_pixels:,} active pixels before rectangular crop)"
+    )
+    return crop_rect
+
+
 def run_average(
     output_dir: Path,
     *,
+    min_coverage: float = 0.0,
     log: Callable[[str], None] = print,
 ) -> dict:
     data, frames = _load_alignment_data(output_dir)
@@ -896,6 +949,10 @@ def run_average(
         fit_origin=data["fit_origin"],
         output_size=data["output_size"],
     )
+    coverage_crop = _coverage_crop_for_output(data, frames, min_coverage, log=log)
+    if coverage_crop is not None:
+        average = crop_image(average, coverage_crop)
+        average_valid = crop_image(average_valid, coverage_crop)
     output_path = output_dir / "average.jpg"
     _save_jpeg(output_path, average, data["jpeg_quality"])
     valid_pixels = int(np.count_nonzero(average_valid > 0))
@@ -906,6 +963,8 @@ def run_average(
         "output": output_path.name,
         "images": len(frames),
         "valid_pixel_count": valid_pixels,
+        "min_coverage_percent": min_coverage,
+        "coverage_crop": list(coverage_crop) if coverage_crop is not None else None,
     }
 
 
@@ -915,6 +974,7 @@ def run_mosaic(
     polygon_count: int = 50,
     seed: int | None = None,
     polygon_size: float = 1.0,
+    min_coverage: float = 0.0,
     log: Callable[[str], None] = print,
 ) -> dict:
     if polygon_count < 0:
@@ -937,6 +997,9 @@ def run_mosaic(
         seed=seed,
         polygon_size=polygon_size,
     )
+    coverage_crop = _coverage_crop_for_output(data, frames, min_coverage, log=log)
+    if coverage_crop is not None:
+        mosaic = crop_image(mosaic, coverage_crop)
     output_path = output_dir / "mosaic.jpg"
     _save_jpeg(output_path, mosaic, data["jpeg_quality"])
     log(
@@ -956,6 +1019,8 @@ def run_mosaic(
         "coverage_fraction": 1.0,
         "final_fill_pixel_count": fill_pixels,
         "seed": seed,
+        "min_coverage_percent": min_coverage,
+        "coverage_crop": list(coverage_crop) if coverage_crop is not None else None,
     }
 
 
@@ -964,6 +1029,7 @@ def run_video(
     *,
     duration: float = 0.5,
     order: str = "random",
+    min_coverage: float = 0.0,
     log: Callable[[str], None] = print,
 ) -> dict:
     if duration <= 0:
@@ -982,6 +1048,24 @@ def run_video(
         fit_origin=data["fit_origin"],
         output_size=data["output_size"],
     )
+    coverage_crop = _coverage_crop_for_output(data, frames, min_coverage, log=log)
+    video_crop = coverage_crop
+    if video_crop is not None:
+        x, y, width, height = video_crop
+        even_width = width - (width % 2)
+        even_height = height - (height % 2)
+        if even_width <= 0 or even_height <= 0:
+            log(
+                "Warning: coverage crop is smaller than the minimum even video frame size; "
+                "leaving the original canvas unchanged."
+            )
+            video_crop = None
+        elif (even_width, even_height) != (width, height):
+            video_crop = (x, y, even_width, even_height)
+            log(
+                f"Video crop adjusted to even dimensions: x={x}, y={y}, "
+                f"w={even_width}, h={even_height}"
+            )
     log(f"Video order: {order} ({len(ordered_frames)} images)")
     log("Creating video...")
     output_path = output_dir / f"video_{order}.mp4"
@@ -989,6 +1073,7 @@ def run_video(
         [frame.output_path for frame in ordered_frames],
         output_path,
         duration=duration,
+        crop_rect=video_crop,
     )
     log(f"Video: {output_path.name} ({duration:g}s per image)")
     log("Done.")
@@ -998,4 +1083,6 @@ def run_video(
         "images": len(ordered_frames),
         "order": order,
         "duration_seconds_per_image": duration,
+        "min_coverage_percent": min_coverage,
+        "coverage_crop": list(video_crop) if video_crop is not None else None,
     }

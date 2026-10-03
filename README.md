@@ -1,10 +1,8 @@
 # viewalign
 
-A small cross-platform CLI for aligning photos taken from approximately the same viewpoint to a common coordinate system.
+ViewAlign is a small cross-platform CLI for turning a collection of photos taken from approximately the same place and direction into a consistent visual sequence. It can align photos taken on different days or over long periods, then independently create an average image, a random-polygon mosaic, and order-specific videos from the saved alignment. The focus is on keeping the workflow simple and reproducible while making the expensive alignment step reusable.
 
-The alignment step uses SIFT feature matching and a RANSAC-estimated similarity transform (`cv2.estimateAffinePartial2D`). It supports JPEG/PNG input, EXIF orientation normalization, filename/timestamp input ordering, different input resolutions/orientations, JPEG output, alignment diagnostics, reference-based or global alignment, and automatic upright correction for global mode.
-
-Derived outputs are separate CLI operations. `align` only performs alignment and writes reusable alignment metadata; `average`, `mosaic`, and `video` read those alignment outputs and can be rerun independently without repeating SIFT matching.
+> **AI-assisted development disclaimer:** parts of ViewAlign were designed and implemented with assistance from generative AI. AI-generated code and suggestions can contain mistakes, so review the results and validate outputs before relying on them for important work.
 
 ## Install
 
@@ -16,45 +14,133 @@ FFmpeg is provided by the `imageio-ffmpeg` Python dependency, so `uv sync` insta
 
 ## Workflow
 
-First align the photos:
+Alignment and derived outputs are separate operations.
+
+### 1. Align photos
 
 ```bash
-uv run viewalign align --input ./photos --output ./output
+uv run viewalign align \
+  --input ./photos \
+  --output ./output \
+  --reference global
 ```
 
 The alignment command creates:
 
 ```text
 output/
-├── aligned/              # transformed JPEG frames
-├── diagnostics/          # only when --diagnostics is used
-├── metrics.json          # per-image alignment metrics
-├── summary.json          # alignment summary
-├── alignment.json        # reusable geometry/transform manifest
+├── aligned/
+├── diagnostics/          # only with --diagnostics
+├── metrics.json
+├── summary.json
+├── alignment.json
 └── pairwise_metrics.json # global mode only
 ```
 
-Then create whichever derived outputs you want:
+### 2. Create derived outputs
+
+Average image:
 
 ```bash
 uv run viewalign average --input ./output
+```
+
+Mosaic image:
+
+```bash
 uv run viewalign mosaic --input ./output --polygons 80 --polygon-size 1.0 --seed 42
+```
+
+Video:
+
+```bash
 uv run viewalign video --input ./output --duration 0.75 --order brightness
 ```
 
-These commands write their results into the same alignment output directory:
+The derived commands reuse `alignment.json` and the `aligned/` directory, so you can experiment with output settings without running alignment again.
 
-```text
-output/
-├── aligned/
-├── average.jpg
-├── mosaic.jpg
-├── video_random.mp4
-├── video_brightness.mp4
-└── video_center.mp4
+## Minimum coverage crop
+
+`average`, `mosaic`, and `video` accept:
+
+```bash
+--min-coverage 50
 ```
 
-This separation means you can experiment with different mosaic seeds, polygon counts, video durations, or video ordering without running alignment again.
+The value is a percentage from `0` to `100`, with a default of `0`.
+
+A pixel is considered active only when at least that percentage of the successfully aligned images geometrically cover it. The command creates the requested output on the original alignment canvas, then finds the largest rectangular crop contained entirely inside that active region and cuts the top, bottom, left, and right sides to that rectangle.
+
+For example, with 96 aligned images:
+
+```text
+--min-coverage 50
+```
+
+requires every pixel in the final rectangle to be covered by at least 48 images.
+
+This is intentionally a rectangular crop, so internal holes in the coverage map can cause the crop to become smaller than the bounding box of all active pixels. This guarantees that every pixel left in the final output satisfies the requested threshold.
+
+If the threshold is so high that no pixel is covered by enough images to form a non-empty rectangle, ViewAlign prints a warning and keeps the original canvas instead of creating an invalid zero-sized image.
+
+`--min-coverage 0` disables this additional crop.
+
+## Average image
+
+Run:
+
+```bash
+uv run viewalign average --input ./output --min-coverage 50
+```
+
+`average.jpg` averages the aligned frames pixel-by-pixel. Geometric validity masks are used to ignore black areas introduced by warping while keeping genuine black pixels from source images such as night scenes.
+
+## Mosaic image
+
+Run:
+
+```bash
+uv run viewalign mosaic \
+  --input ./output \
+  --polygons 80 \
+  --polygon-size 1.0 \
+  --seed 42 \
+  --min-coverage 25
+```
+
+`mosaic.jpg` is an independent composition of polygon patches from aligned frames. The random phase targets uncovered regions, polygons are clipped to geometrically valid source areas, and a final coverage pass fills every geometrically coverable pixel. The mosaic never uses `average.jpg` as a background.
+
+`--polygon-size` controls the typical polygon size as a multiplier of the default size. For example, `0.5` produces smaller pieces and `2.0` produces larger pieces. It controls the scale of the pieces rather than an exact polygon area.
+
+The final `--min-coverage` crop is applied after the mosaic has been generated.
+
+## Video
+
+Run:
+
+```bash
+uv run viewalign video \
+  --input ./output \
+  --duration 0.5 \
+  --order random \
+  --min-coverage 50
+```
+
+The output filename includes the selected ordering:
+
+```text
+video_random.mp4
+video_brightness.mp4
+video_center.mp4
+```
+
+Ordering modes:
+
+- `random`: random order.
+- `brightness`: brightest to darkest, based on mean luminance over geometrically valid pixels.
+- `center`: left to right, based on the transformed source-image center in the final output coordinate system.
+
+The minimum-coverage crop is applied to the video frames as well, so all frames use the same final rectangle.
 
 ## Align options
 
@@ -62,7 +148,7 @@ This separation means you can experiment with different mosaic seeds, polygon co
 uv run viewalign align \
   --input ./photos \
   --output ./output \
-  --reference first \
+  --reference global \
   --upright auto \
   --order timestamp \
   --working-size 1600 \
@@ -74,83 +160,63 @@ The command continues when an individual image cannot be aligned. `metrics.json`
 
 ### Reference modes
 
-By default, ViewAlign aligns every image directly to a chosen reference image:
+- `--reference first`: use the first image after input ordering.
+- `--reference middle`: use the middle image after input ordering.
+- `--reference <path>`: use a specific input image as the reference.
+- `--reference global`: compute reference-free global alignment from pairwise relationships.
 
-- `--reference first` uses the first image after the selected input ordering.
-- `--reference middle` uses the middle image.
-- `--reference <path>` uses a specific input image.
-- `--reference global` performs reference-free global alignment.
+For global mode, `--upright auto` estimates one scene-wide roll correction from consistent horizontal/vertical line structure and applies that single correction to the entire global coordinate system. `--upright none` disables it. Fixed-reference modes keep the reference image's orientation.
 
-For global mode, `--upright auto` is enabled by default. It estimates one scene-wide roll correction from long horizontal/vertical line structure detected across the registered images, then applies that single correction to the whole global coordinate system. `--upright none` disables this step. Fixed-reference modes are not automatically rotated, so an explicitly chosen reference image continues to define the final horizon/orientation.
+### Crop modes during alignment
 
-### Global alignment
+`--crop fit` is the default. The alignment output canvas is expanded to contain the transformed source images and empty areas are black.
 
-`--reference global` first computes pairwise similarity transforms between every unordered pair of loaded images. The other direction is represented by the inverse transform, so `N` images require `N(N-1)/2` feature-matching attempts.
+`--crop none` keeps the reference-sized canvas, so transformed images may be clipped at the edges.
 
-Successful pairwise matches form an alignment graph. ViewAlign finds its connected components, selects the largest component, and solves one global similarity transform per image using all successful pairwise measurements in that component. Pairwise coordinates are normalized by each image's size before the global solve, which prevents differences in image resolution and pathological scale estimates from making the global canvas explode. Higher-quality pairwise measurements receive higher weights, and robust reweighting reduces the influence of inconsistent edges.
+`--crop intersection` keeps only the common valid region shared by the aligned images.
 
-This means an image does not have to match one particular reference image directly. It can still be included when it connects reliably through other images. Images outside the selected connected component are rejected instead of being forced into the common coordinate system.
+These alignment crop modes define the base canvas. `--min-coverage` is a separate post-processing crop used by `average`, `mosaic`, and `video`.
 
-The pairwise measurements are stored in `pairwise_metrics.json` as a two-dimensional matrix indexed by the listed image names. Each successful unordered pair has an estimated transform in one direction and a derived inverse in the other matrix cell.
+## Global alignment details
 
-Global mode chooses a deterministic anchor image only to define the final coordinate system; it is not used as the sole source of alignment measurements.
+Global mode computes pairwise similarity transforms for every unordered pair of loaded images. Successful measurements form a graph; the largest connected component is selected and a global similarity transform is solved for every image in that component using the available pairwise measurements.
 
-## Alignment manifest
+Pairwise measurements are filtered for implausible geometry, weighted by match quality, and robustly reweighted during the global solve. Image dimensions are normalized during the global optimization so differences in resolution do not destabilize the coordinate system. The deterministic global anchor only defines the final coordinate system; it is not the sole alignment reference.
 
-`alignment.json` is the handoff between the alignment step and the derived-output commands. It stores the output geometry, crop mode, fit origin, reference size, and the final transform and source dimensions for every successfully aligned frame.
+## Technical details
 
-Derived commands use this manifest together with `aligned/` rather than recomputing alignment. Keeping the geometric validity information is important: average, mosaic, brightness ordering, and center ordering must distinguish legitimate black image content from black pixels created by warping outside the source image.
+ViewAlign currently uses:
 
-## Crop modes
+- SIFT feature detection and description.
+- Descriptor matching with Lowe's ratio test.
+- RANSAC-based similarity-transform estimation.
+- Full-resolution warping after reduced-resolution feature matching.
+- EXIF orientation normalization.
+- JPEG/PNG input and JPEG aligned output.
+- Geometric validity masks so real black content is not confused with warp borders.
+- Optional alignment diagnostics and JSON metrics/manifests.
 
-`fit` is the default. The output canvas is expanded as necessary so the entire transformed source image is visible, including portions that move outside the reference image bounds. Empty areas are filled with black.
+`alignment.json` is the reusable handoff between the alignment step and the derived-output commands. It stores output geometry and the final transform and source-size metadata required to reconstruct valid-pixel masks.
 
-`none` keeps the reference-sized canvas, so an image can be clipped at the edges.
+## Outputs
 
-`intersection` crops all outputs to the common valid area shared by the successfully aligned images.
+A typical project directory can contain:
 
-## Average image
-
-Run:
-
-```bash
-uv run viewalign average --input ./output
+```text
+output/
+├── aligned/
+├── diagnostics/
+├── metrics.json
+├── summary.json
+├── alignment.json
+├── pairwise_metrics.json
+├── average.jpg
+├── mosaic.jpg
+├── video_random.mp4
+├── video_brightness.mp4
+└── video_center.mp4
 ```
-
-`average.jpg` averages the aligned output frames pixel-by-pixel. It uses geometric validity masks from the alignment manifest, rather than testing whether pixels are black. This means black content from genuine night images is still included, while black border areas created by warping are ignored.
-
-## Mosaic image
-
-Run:
-
-```bash
-uv run viewalign mosaic --input ./output --polygons 50 --polygon-size 1.0 --seed 42
-```
-
-`mosaic.jpg` is an independent composition made from random polygon patches from aligned frames. A polygon is only placed when nearly all of its area is valid for the selected source frame, so warped black borders are not copied into the collage.
-
-The mosaic does not use `average.jpg` as a background and can be generated even when the average image does not exist.
-
-`--polygon-size` controls the typical polygon size as a multiplier of the default size. For example, `0.5` produces smaller pieces and `2.0` produces larger pieces. It is a size scale, not an exact area.
-
-Mosaic generation is coverage-aware. Random polygons preferentially target currently uncovered regions and are clipped to geometrically valid source areas. After the random phase, a final fill pass assigns every remaining geometrically coverable pixel from an aligned frame. Therefore black remains only where no aligned source image can geometrically provide a pixel. Real black pixels from source images are still treated as valid image content.
-
-The command reports the guaranteed coverage explicitly, for example: `Mosaic coverage: 100.0% of coverable area`.
-
-## Video
-
-Run:
-
-```bash
-uv run viewalign video --input ./output --duration 0.5 --order random
-```
-
-The video command generates `video_random.mp4`, `video_brightness.mp4`, or `video_center.mp4` depending on `--order`. `--duration` controls how long each image is displayed. `--order` controls the sequence independently of the alignment order:
-
-- `random`: shuffle aligned images randomly.
-- `brightness`: sort from highest to lowest mean luminance over geometrically valid pixels, so bright daytime/snowy images tend to come first and dark/night images tend to come last.
-- `center`: sort by the transformed source-image center from left to right in the final output coordinate system.
 
 ## FFmpeg
 
-The project depends on `imageio-ffmpeg`. ViewAlign discovers its FFmpeg executable automatically at runtime, so there is no `--ffmpeg-path` CLI option.
+ViewAlign depends on `imageio-ffmpeg` and discovers its FFmpeg executable automatically at runtime. There is no FFmpeg path CLI option.

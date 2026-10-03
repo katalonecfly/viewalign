@@ -1,7 +1,7 @@
 [project]
 name = "viewalign"
-version = "0.7.1"
-description = "Align photos taken from approximately the same viewpoint to a common reference."
+version = "0.8.0"
+description = "Align photos from approximately the same viewpoint and create derived visualizations."
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [

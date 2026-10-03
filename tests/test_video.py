@@ -46,3 +46,27 @@ def test_create_video(tmp_path: Path) -> None:
     assert "nb_frames=2" in probe
     assert "width=34" in probe
     assert "height=32" in probe
+
+
+def test_create_video_applies_crop(tmp_path: Path) -> None:
+    paths = []
+    for index, value in enumerate((50, 150)):
+        image = np.full((40, 60, 3), value, dtype=np.uint8)
+        path = tmp_path / f"frame_{index}.jpg"
+        assert cv2.imwrite(str(path), image)
+        paths.append(path)
+
+    output = tmp_path / "cropped.mp4"
+    create_video(paths, output, duration=0.2, crop_rect=(10, 4, 40, 32))
+    assert output.exists()
+
+    probe = subprocess.run(
+        [
+            "ffprobe", "-v", "error",
+            "-show_entries", "stream=width,height",
+            "-of", "default=noprint_wrappers=1", str(output),
+        ],
+        check=True, capture_output=True, text=True,
+    ).stdout
+    assert "width=40" in probe
+    assert "height=32" in probe

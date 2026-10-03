@@ -59,6 +59,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     average = subparsers.add_parser("average", help="Create average.jpg from an existing alignment")
     average.add_argument("--input", type=Path, required=True, help="Alignment output directory from 'align'")
+    average.add_argument(
+        "--min-coverage", type=float, default=0.0,
+        help="Crop output so every pixel is covered by at least this percentage of aligned images (0-100; default: 0)",
+    )
 
     mosaic = subparsers.add_parser("mosaic", help="Create mosaic.jpg from an existing alignment")
     mosaic.add_argument("--input", type=Path, required=True, help="Alignment output directory from 'align'")
@@ -71,6 +75,10 @@ def build_parser() -> argparse.ArgumentParser:
         help="Scale of the typical polygon size relative to the default (default: 1.0)",
     )
     mosaic.add_argument("--seed", type=int, default=None, help="Optional random seed for reproducible mosaics")
+    mosaic.add_argument(
+        "--min-coverage", type=float, default=0.0,
+        help="Crop output so every pixel is covered by at least this percentage of aligned images (0-100; default: 0)",
+    )
 
     video = subparsers.add_parser("video", help="Create video_<order>.mp4 from an existing alignment")
     video.add_argument("--input", type=Path, required=True, help="Alignment output directory from 'align'")
@@ -81,6 +89,10 @@ def build_parser() -> argparse.ArgumentParser:
     video.add_argument(
         "--order", choices=("random", "brightness", "center"), default="random",
         help="Video order: random, brightness, or center (default: random)",
+    )
+    video.add_argument(
+        "--min-coverage", type=float, default=0.0,
+        help="Crop output so every pixel is covered by at least this percentage of aligned images (0-100; default: 0)",
     )
     return parser
 
@@ -113,22 +125,34 @@ def main(argv: list[str] | None = None) -> None:
                 ransac_threshold=args.ransac_threshold,
             )
         elif args.command == "average":
-            run_average(args.input)
+            if not 0.0 <= args.min_coverage <= 100.0:
+                parser.error("--min-coverage must be between 0 and 100")
+            run_average(args.input, min_coverage=args.min_coverage)
         elif args.command == "mosaic":
             if args.polygons < 0:
                 parser.error("--polygons must be zero or greater")
             if args.polygon_size <= 0:
                 parser.error("--polygon-size must be greater than zero")
+            if not 0.0 <= args.min_coverage <= 100.0:
+                parser.error("--min-coverage must be between 0 and 100")
             run_mosaic(
                 args.input,
                 polygon_count=args.polygons,
                 polygon_size=args.polygon_size,
                 seed=args.seed,
+                min_coverage=args.min_coverage,
             )
         elif args.command == "video":
             if args.duration <= 0:
                 parser.error("--duration must be greater than zero")
-            run_video(args.input, duration=args.duration, order=args.order)
+            if not 0.0 <= args.min_coverage <= 100.0:
+                parser.error("--min-coverage must be between 0 and 100")
+            run_video(
+                args.input,
+                duration=args.duration,
+                order=args.order,
+                min_coverage=args.min_coverage,
+            )
     except (OSError, ValueError, RuntimeError, KeyError) as exc:
         parser.exit(1, f"viewalign: error: {exc}\n")
 

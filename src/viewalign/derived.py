@@ -75,6 +75,113 @@ def valid_mask_for_frame(
     return warped
 
 
+
+def compute_valid_coverage(
+    frames: Sequence[RenderedFrame],
+    *,
+    reference_size: tuple[int, int],
+    crop: str,
+    crop_rect: tuple[int, int, int, int] | None,
+    fit_origin: tuple[float, float],
+    output_size: tuple[int, int],
+) -> np.ndarray:
+    """Return the number of aligned frames that geometrically cover each output pixel."""
+    if not frames:
+        raise ValueError("Cannot compute coverage for an empty frame set")
+
+    output_width, output_height = output_size
+    counts = np.zeros((output_height, output_width), dtype=np.uint16)
+    for frame in frames:
+        mask = valid_mask_for_frame(
+            frame,
+            reference_size=reference_size,
+            crop=crop,
+            crop_rect=crop_rect,
+            fit_origin=fit_origin,
+            output_size=output_size,
+        )
+        counts += (mask > 0).astype(np.uint16)
+    return counts
+
+
+def _largest_active_rectangle(active: np.ndarray) -> tuple[int, int, int, int] | None:
+    """Find the largest axis-aligned rectangle containing only active pixels."""
+    if active.ndim != 2:
+        raise ValueError("active coverage mask must be two-dimensional")
+    height, width = active.shape
+    if height == 0 or width == 0 or not np.any(active):
+        return None
+
+    heights = np.zeros(width, dtype=np.int32)
+    best: tuple[int, int, int, int] | None = None
+    best_area = 0
+    best_short_side = -1
+
+    for y, row in enumerate(active):
+        heights[row] += 1
+        heights[~row] = 0
+
+        stack: list[int] = []
+        for x in range(width + 1):
+            current_height = int(heights[x]) if x < width else 0
+            while stack and int(heights[stack[-1]]) > current_height:
+                index = stack.pop()
+                rect_height = int(heights[index])
+                left = stack[-1] + 1 if stack else 0
+                rect_width = x - left
+                area = rect_width * rect_height
+                if area <= 0:
+                    continue
+                short_side = min(rect_width, rect_height)
+                if area > best_area or (area == best_area and short_side > best_short_side):
+                    best_area = area
+                    best_short_side = short_side
+                    best = (left, y - rect_height + 1, rect_width, rect_height)
+            stack.append(x)
+
+    return best
+
+
+def compute_coverage_crop(
+    coverage_counts: np.ndarray,
+    *,
+    image_count: int,
+    min_coverage: float,
+) -> tuple[tuple[int, int, int, int] | None, int, int]:
+    """Find a rectangular crop whose every pixel is covered by at least ``min_coverage`` of images.
+
+    Returns ``(crop_rect, required_image_count, active_pixel_count)``. With a zero
+    threshold the full image is active and no crop is necessary.
+    """
+    if image_count <= 0:
+        raise ValueError("image_count must be greater than zero")
+    if not 0.0 <= min_coverage <= 100.0 or not np.isfinite(min_coverage):
+        raise ValueError("min_coverage must be between 0 and 100")
+    if coverage_counts.ndim != 2:
+        raise ValueError("coverage_counts must be two-dimensional")
+    if coverage_counts.size == 0:
+        return None, 0, 0
+    if min_coverage == 0.0:
+        height, width = coverage_counts.shape
+        return (0, 0, width, height), 0, int(coverage_counts.size)
+
+    required_images = max(1, int(np.ceil((min_coverage / 100.0) * image_count - 1e-12)))
+    active = coverage_counts >= required_images
+    active_pixel_count = int(np.count_nonzero(active))
+    return _largest_active_rectangle(active), required_images, active_pixel_count
+
+
+def crop_image(image: np.ndarray, crop_rect: tuple[int, int, int, int]) -> np.ndarray:
+    """Return an exact copy of ``image`` cropped to ``(x, y, width, height)``."""
+    x, y, width, height = (int(value) for value in crop_rect)
+    image_height, image_width = image.shape[:2]
+    if width <= 0 or height <= 0:
+        raise ValueError("crop rectangle must have positive width and height")
+    if x < 0 or y < 0 or x + width > image_width or y + height > image_height:
+        raise ValueError("crop rectangle is outside the image")
+    return image[y : y + height, x : x + width].copy()
+
+
 def create_average(
     frames: Sequence[RenderedFrame],
     *,

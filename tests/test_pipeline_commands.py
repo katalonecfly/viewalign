@@ -66,14 +66,36 @@ def test_derived_commands_consume_alignment_outputs(tmp_path: Path, monkeypatch)
     assert (output / "mosaic.jpg").exists()
 
     created = {}
-    def fake_video(paths, destination, duration):
+    def fake_video(paths, destination, duration, crop_rect=None):
         created["paths"] = paths
         created["destination"] = destination
         created["duration"] = duration
+        created["crop_rect"] = crop_rect
 
     monkeypatch.setattr("viewalign.pipeline.create_video", fake_video)
     video_result = run_video(output, duration=0.25, order="center", log=lambda _: None)
     assert video_result["output"] == "video_center.mp4"
     assert created["duration"] == 0.25
     assert created["destination"].name == "video_center.mp4"
+    assert created["crop_rect"] is None
     assert [Path(path).name for path in created["paths"]] == ["frame_0.jpg", "frame_1.jpg", "frame_2.jpg"]
+
+
+def test_derived_commands_apply_min_coverage_crop(tmp_path: Path, monkeypatch) -> None:
+    output = _write_manifest(tmp_path)
+
+    logs = []
+    average_result = run_average(output, min_coverage=100.0, log=logs.append)
+    assert average_result["coverage_crop"] == [2, 0, 28, 20]
+    image = cv2.imread(str(output / "average.jpg"), cv2.IMREAD_COLOR)
+    assert image is not None
+    assert image.shape[:2] == (20, 28)
+    assert any("Coverage crop: x=2, y=0, w=28, h=20" in line for line in logs)
+
+    created = {}
+    def fake_video(paths, destination, duration, crop_rect=None):
+        created["crop_rect"] = crop_rect
+
+    monkeypatch.setattr("viewalign.pipeline.create_video", fake_video)
+    run_video(output, min_coverage=100.0, order="random", log=lambda _: None)
+    assert created["crop_rect"] == (2, 0, 28, 20)

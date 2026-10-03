@@ -3,7 +3,12 @@ import random
 import cv2
 import numpy as np
 
-from viewalign.derived import RenderedFrame, create_average, create_mosaic
+from viewalign.derived import (
+    RenderedFrame,
+    compute_coverage_crop,
+    create_average,
+    create_mosaic,
+)
 
 
 def _frame(tmp_path, name: str, image: np.ndarray, transform=None) -> RenderedFrame:
@@ -150,3 +155,48 @@ def test_random_valid_center_accepts_2d_find_nonzero_shape(monkeypatch):
     center = derived._random_valid_center(mask, random.Random(1))
 
     assert center == (5, 3)
+
+
+def test_coverage_crop_requires_every_pixel_to_meet_threshold() -> None:
+    counts = np.array(
+        [
+            [4, 4, 4, 4, 4],
+            [4, 4, 4, 4, 4],
+            [4, 4, 2, 4, 4],
+            [4, 4, 4, 4, 4],
+        ],
+        dtype=np.uint16,
+    )
+
+    crop, required, active_pixels = compute_coverage_crop(
+        counts, image_count=4, min_coverage=75.0,
+    )
+
+    assert required == 3
+    assert active_pixels == 19
+    assert crop == (0, 0, 5, 2)
+    x, y, w, h = crop
+    assert np.all(counts[y : y + h, x : x + w] >= required)
+
+
+def test_coverage_crop_zero_threshold_keeps_full_canvas() -> None:
+    counts = np.zeros((3, 5), dtype=np.uint16)
+    crop, required, active_pixels = compute_coverage_crop(
+        counts, image_count=4, min_coverage=0.0,
+    )
+
+    assert crop == (0, 0, 5, 3)
+    assert required == 0
+    assert active_pixels == 15
+
+
+def test_coverage_crop_can_have_no_valid_rectangle() -> None:
+    counts = np.array([[1, 1], [1, 1]], dtype=np.uint16)
+    crop, required, active_pixels = compute_coverage_crop(
+        counts, image_count=2, min_coverage=100.0,
+    )
+
+    # One image has disappeared from the whole frame, so no pixel satisfies 100%.
+    assert crop is None
+    assert required == 2
+    assert active_pixels == 0

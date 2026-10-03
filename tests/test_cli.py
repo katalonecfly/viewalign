@@ -18,13 +18,16 @@ def test_align_parser_defaults() -> None:
 
 def test_derived_commands() -> None:
     parser = build_parser()
-    assert parser.parse_args(["average", "--input", "out"]).command == "average"
+    average = parser.parse_args(["average", "--input", "out"])
+    assert average.command == "average"
+    assert average.min_coverage == 0.0
 
     mosaic = parser.parse_args(["mosaic", "--input", "out", "--polygons", "80", "--seed", "42"])
     assert mosaic.command == "mosaic"
     assert mosaic.polygons == 80
     assert mosaic.polygon_size == 1.0
     assert mosaic.seed == 42
+    assert mosaic.min_coverage == 0.0
 
     mosaic_sized = parser.parse_args([
         "mosaic", "--input", "out", "--polygons", "80", "--polygon-size", "1.5",
@@ -35,6 +38,12 @@ def test_derived_commands() -> None:
     assert video.command == "video"
     assert video.duration == 0.75
     assert video.order == "brightness"
+    assert video.min_coverage == 0.0
+
+    custom = parser.parse_args([
+        "average", "--input", "out", "--min-coverage", "37.5",
+    ])
+    assert custom.min_coverage == 37.5
 
 
 def test_crop_modes() -> None:
@@ -63,6 +72,13 @@ def test_global_reference_option() -> None:
     assert args.reference == "global"
 
 
+def test_min_coverage_parser_range_is_present() -> None:
+    parser = build_parser()
+    for command in ("average", "mosaic", "video"):
+        args = parser.parse_args([command, "--input", "out", "--min-coverage", "100"])
+        assert args.min_coverage == 100.0
+
+
 def test_upright_modes() -> None:
     parser = build_parser()
     for mode in ("auto", "none"):
@@ -72,7 +88,7 @@ def test_upright_modes() -> None:
         assert args.upright == mode
 
 
-def test_version_is_0_7_0() -> None:
+def test_version_is_0_8_0() -> None:
     from viewalign import __version__
 
-    assert __version__ == "0.7.1"
+    assert __version__ == "0.8.0"

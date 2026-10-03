@@ -28,6 +28,7 @@ def create_video(
     output_path: Path,
     *,
     duration: float,
+    crop_rect: tuple[int, int, int, int] | None = None,
 ) -> None:
     """Create a video where each input image is displayed for `duration` seconds."""
     if not image_paths:
@@ -46,6 +47,14 @@ def create_video(
         manifest = Path(temp_dir) / "frames.txt"
         _build_concat_manifest(image_paths, duration, manifest)
         fps = Fraction(1.0 / duration).limit_denominator(100000)
+        filters: list[str] = []
+        if crop_rect is not None:
+            x, y, width, height = (int(value) for value in crop_rect)
+            if x < 0 or y < 0 or width <= 0 or height <= 0:
+                raise ValueError("Invalid video crop rectangle")
+            filters.append(f"crop={width}:{height}:{x}:{y}")
+        filters.append("pad=ceil(iw/2)*2:ceil(ih/2)*2")
+
         command = [
             executable,
             "-y",
@@ -63,7 +72,7 @@ def create_video(
             "-r",
             f"{fps.numerator}/{fps.denominator}",
             "-vf",
-            "pad=ceil(iw/2)*2:ceil(ih/2)*2",
+            ",".join(filters),
             "-c:v",
             "libx264",
             "-pix_fmt",
