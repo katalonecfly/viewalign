@@ -6,20 +6,25 @@ ViewAlign is a small cross-platform CLI for aligning photos taken from approxima
 
 <table>
 <tr>
-<td align="center" width="33%">
+<td align="center">
+<strong>Video (giffed)</strong><br>
+<img src="examples/video.gif" alt="Video example" width="640">
+</td>
+</tr>
+<tr>
+<td>
+<table>
+<tr>
+<td align="center" width="50%">
 <strong>Average</strong><br>
-<a href="examples/generated/average.jpg"><img src="examples/generated/average.jpg" alt="Average example" width="280"></a>
+<a href="examples/average.jpg"><img src="examples/average.jpg" alt="Average example" width="280"></a>
 </td>
-<td align="center" width="33%">
+<td align="center" width="50%">
 <strong>Mosaic</strong><br>
-<a href="examples/generated/mosaic.jpg"><img src="examples/generated/mosaic.jpg" alt="Mosaic example" width="280"></a>
+<a href="examples/mosaic.jpg"><img src="examples/mosaic.jpg" alt="Mosaic example" width="280"></a>
 </td>
-<td align="center" width="33%">
-<strong>Video</strong><br>
-<video controls width="280">
-  <source src="examples/generated/video.mp4" type="video/mp4">
-  <a href="examples/generated/video.mp4">Video example</a>
-</video>
+</tr>
+</table>
 </td>
 </tr>
 </table>
