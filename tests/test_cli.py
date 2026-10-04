@@ -94,7 +94,7 @@ def test_upright_modes() -> None:
 def test_version_is_0_9_0() -> None:
     from viewalign import __version__
 
-    assert __version__ == "0.9.0"
+    assert __version__ == "0.9.1"
 
 
 def test_derived_filename_parser() -> None:
